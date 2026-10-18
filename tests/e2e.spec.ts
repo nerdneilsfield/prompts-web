@@ -539,3 +539,25 @@ test("退出登录失败（503）保持已登录并可重试，成功后刷新�
   await expect(page.getByLabel("站点密码")).toBeVisible();
   await expect(page.getByRole("navigation", { name: "主导航" })).toHaveCount(0);
 });
+
+test("会话已在别处结束：退出得到真实 401，回到登录页且刷新仍未登录", async ({ page, context, playwright }) => {
+  await login(page);
+  const cookies = await context.cookies();
+  // 另一个 HTTP client 带同一会话 cookie，真实结束服务端会话（不是伪造响应）
+  const origin = new URL(page.url()).origin;
+  const other = await playwright.request.newContext({
+    baseURL: origin,
+    extraHTTPHeaders: { Cookie: cookies.map((c) => `${c.name}=${c.value}`).join("; "), Origin: origin },
+  });
+  expect((await other.delete("/api/session")).ok()).toBe(true);
+  expect((await other.get("/api/session").then((r) => r.json())).authenticated).toBe(false);
+  await other.dispose();
+
+  const del = page.waitForResponse((r) => r.url().endsWith("/api/session") && r.request().method() === "DELETE");
+  await page.getByRole("button", { name: "退出登录" }).click();
+  expect((await del).status()).toBe(401);
+  await expect(page.getByLabel("站点密码")).toBeVisible();
+  await expect(page.getByText("退出登录失败")).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByLabel("站点密码")).toBeVisible();
+});

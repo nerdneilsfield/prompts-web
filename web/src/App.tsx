@@ -77,12 +77,17 @@ export function App() {
     if (loggingOut) return;
     setLoggingOut(true);
     setLogoutErr("");
-    try {
-      await api("DELETE", "/api/session");
+    const leave = () => {
       setEverIn(false);
       setSession((s) => (s ? { ...s, authenticated: false } : s));
-    } catch {
-      setLogoutErr("退出登录失败，当前仍保持登录。请重试。");
+    };
+    try {
+      await api("DELETE", "/api/session");
+      leave();
+    } catch (e) {
+      // 401: the session is already gone (expired or ended elsewhere) -- the same outcome as success.
+      if (e instanceof ApiError && e.status === 401) leave();
+      else setLogoutErr("退出登录失败，当前仍保持登录。请重试。");
     } finally {
       setLoggingOut(false);
     }
