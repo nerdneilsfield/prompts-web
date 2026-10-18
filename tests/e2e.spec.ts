@@ -1,0 +1,258 @@
+import { expect, test, type Page } from "@playwright/test";
+
+test.describe.configure({ mode: "serial" });
+
+async function login(page: Page) {
+  await page.goto("/");
+  await page.getByLabel("站点密码").fill("secret");
+  await page.getByRole("button", { name: "登录" }).click();
+  await expect(page.getByRole("navigation", { name: "主导航" })).toBeVisible();
+}
+
+async function newPrompt(page: Page, title: string, body: string, tags: string[]) {
+  await page.getByRole("button", { name: "＋ 新增 Prompt" }).click();
+  const form = page.getByRole("form", { name: "新增 Prompt" });
+  await form.getByLabel("标题").fill(title);
+  await form.getByLabel("正文").fill(body);
+  for (const t of tags) {
+    await form.getByLabel("标签（可添加多个）").fill(t);
+    await form.getByLabel("标签（可添加多个）").press("Enter");
+  }
+  await form.getByRole("button", { name: "保存" }).click();
+  await expect(page.getByRole("heading", { name: title })).toBeVisible();
+}
+
+const tagBar = (page: Page) => page.getByLabel("标签筛选");
+const cards = (page: Page) => page.getByRole("list").locator(".card");
+
+test("登录失败与空库可直接新增", async ({ page }) => {
+  await page.goto("/");
+  await page.getByLabel("站点密码").fill("wrong");
+  await page.getByRole("button", { name: "登录" }).click();
+  await expect(page.getByText("密码不正确")).toBeVisible();
+  await login(page);
+  await expect(page.getByText("还没有 Prompt")).toBeVisible();
+  await expect(page.getByRole("button", { name: "＋ 新增 Prompt" })).toBeVisible();
+});
+
+test("多 tag、筛选、搜索、复制、编辑 title/body/tags 并刷新验证", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await login(page);
+
+  await newPrompt(page, "周报助手", "请根据 {{内容}} 写周报", ["tagA", "tagB"]);
+  await newPrompt(page, "代码评审", "评审下面的代码：{{code}}", ["tagB"]);
+  await newPrompt(page, "无标签草稿", "随手记", []);
+  await expect(cards(page)).toHaveCount(3);
+
+  // 详情 chips 与侧栏 tag 同步
+  await expect(tagBar(page).getByRole("button", { name: /^tagA/ })).toBeVisible();
+  await expect(tagBar(page).getByRole("button", { name: /^tagB 2/ })).toBeVisible();
+
+  // 点 tag 分类筛选
+  await tagBar(page).getByRole("button", { name: /^tagA/ }).click();
+  await expect(cards(page)).toHaveCount(1);
+  await expect(cards(page).first()).toContainText("周报助手");
+  await expect(page.getByRole("status").filter({ hasText: "当前筛选" })).toContainText("标签「tagA」");
+
+  // 切到 tagB：两条；再叠加关键词
+  await tagBar(page).getByRole("button", { name: /^tagB/ }).click();
+  await expect(cards(page)).toHaveCount(2);
+  await page.getByLabel("搜索标题或正文").fill("评审");
+  await expect(cards(page)).toHaveCount(1);
+  await expect(cards(page).first()).toContainText("代码评审");
+  await page.getByRole("button", { name: "清除筛选" }).click();
+  await expect(cards(page)).toHaveCount(3);
+
+  // 点列表卡片上的 chip 也能筛选
+  await cards(page).filter({ hasText: "周报助手" }).getByRole("button", { name: "tagA" }).click();
+  await expect(cards(page)).toHaveCount(1);
+  await page.getByRole("button", { name: "清除筛选" }).click();
+
+  // 复制：占位符原样
+  await cards(page).filter({ hasText: "周报助手" }).click();
+  await page.getByRole("button", { name: "复制正文" }).click();
+  await expect(page.getByText("已复制正文")).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("请根据 {{内容}} 写周报");
+
+  // 编辑：标题、正文、tags 一起改；去掉 tagA 加 tagC
+  await page.getByRole("button", { name: "编辑" }).click();
+  const form = page.getByRole("form", { name: "编辑 Prompt" });
+  await expect(form.getByLabel("标题")).toHaveValue("周报助手");
+  await expect(form.getByLabel("正文")).toHaveValue("请根据 {{内容}} 写周报");
+  await expect(form.getByRole("button", { name: "移除标签 tagA" })).toBeVisible();
+  await expect(form.getByRole("button", { name: "移除标签 tagB" })).toBeVisible();
+  await form.getByLabel("标题").fill("周报助手 v2");
+  await form.getByLabel("正文").fill("请用三段话根据 {{内容}} 写周报");
+  await form.getByRole("button", { name: "移除标签 tagA" }).click();
+  await form.getByLabel("标签（可添加多个）").fill("tagC");
+  await form.getByLabel("标签（可添加多个）").press("Enter");
+  await form.getByRole("button", { name: "保存" }).click();
+
+  const detail = page.getByLabel("Prompt 详情");
+  await expect(detail.getByRole("heading", { name: "周报助手 v2" })).toBeVisible();
+  await expect(detail.getByRole("button", { name: "tagB" })).toBeVisible();
+  await expect(detail.getByRole("button", { name: "tagC" })).toBeVisible();
+  await expect(detail.getByRole("button", { name: "tagA" })).toHaveCount(0);
+  await expect(page.getByTestId("prompt-body")).toHaveText("请用三段话根据 {{内容}} 写周报");
+  // tag 选项立即同步：tagA 不再存在
+  await expect(tagBar(page).getByRole("button", { name: /^tagA/ })).toHaveCount(0);
+  await expect(tagBar(page).getByRole("button", { name: /^tagC/ })).toBeVisible();
+
+  // 刷新后仍在（来自 DB）
+  await page.reload();
+  await expect(cards(page)).toHaveCount(3);
+  await expect(cards(page).first()).toContainText("周报助手 v2");
+  await expect(tagBar(page).getByRole("button", { name: /^tagA/ })).toHaveCount(0);
+  await tagBar(page).getByRole("button", { name: /^tagC/ }).click();
+  await expect(cards(page)).toHaveCount(1);
+  await expect(cards(page).first()).toContainText("周报助手 v2");
+  await cards(page).first().click();
+  await expect(page.getByTestId("prompt-body")).toHaveText("请用三段话根据 {{内容}} 写周报");
+  await page.getByRole("button", { name: "清除筛选" }).click();
+
+  // 清空全部 tags 允许保存
+  await cards(page).filter({ hasText: "周报助手 v2" }).click();
+  await page.getByRole("button", { name: "编辑" }).click();
+  const form2 = page.getByRole("form", { name: "编辑 Prompt" });
+  await form2.getByRole("button", { name: "移除标签 tagB" }).click();
+  await form2.getByRole("button", { name: "移除标签 tagC" }).click();
+  await form2.getByRole("button", { name: "保存" }).click();
+  await expect(detail.getByText("无标签")).toBeVisible();
+  await expect(tagBar(page).getByRole("button", { name: /^tagC/ })).toHaveCount(0);
+  await expect(tagBar(page).getByRole("button", { name: /^tagB 1/ })).toBeVisible();
+
+  // 删除
+  await page.once("dialog", (d) => d.accept());
+  await page.getByRole("button", { name: "删除" }).click();
+  await expect(cards(page)).toHaveCount(2);
+});
+
+async function addScheme(page: Page, name: string, body: string) {
+  await page.getByRole("button", { name: "＋ 新建方案" }).click();
+  const f = page.getByRole("form", { name: "方案表单" });
+  await f.getByLabel("方案名称").fill(name);
+  await f.getByLabel(/方案正文/).fill(body);
+  await f.getByRole("button", { name: "保存方案" }).click();
+  await expect(page.getByRole("button", { name: `编辑方案 ${name}` })).toBeVisible();
+}
+
+test("方案管理与优化：diff、变量警告、编辑另存、原文不变", async ({ page }) => {
+  await login(page);
+  await page.getByRole("button", { name: "优化工作台" }).click();
+  await expect(page.getByText("还没有方案")).toBeVisible();
+  await addScheme(page, "精简", "去掉冗余表达");
+  await addScheme(page, "临时方案", "临时");
+
+  // 方案编辑与删除
+  await page.getByRole("button", { name: "编辑方案 临时方案" }).click();
+  await page.getByRole("form", { name: "方案表单" }).getByLabel("方案名称").fill("临时方案2");
+  await page.getByRole("button", { name: "保存方案" }).click();
+  await expect(page.getByRole("button", { name: "编辑方案 临时方案2" })).toBeVisible();
+  await page.once("dialog", (d) => d.accept());
+  await page.getByRole("button", { name: "删除方案 临时方案2" }).click();
+  await expect(page.getByRole("button", { name: "编辑方案 临时方案2" })).toHaveCount(0);
+
+  const original = "你好 {{name}}，请总结 {{text}}";
+  await page.getByLabel("原文").fill(original);
+  await page.getByRole("button", { name: "开始优化" }).click();
+  const result = page.getByLabel(/优化结果（可编辑）/);
+  await expect(result).toHaveValue("优化后：你好 {{user}}，请总结 {{text}}");
+  await expect(page.getByTestId("diff").locator("ins").first()).toBeVisible();
+  const warn = page.getByTestId("placeholder-warning");
+  await expect(warn).toContainText("丢失的变量");
+  await expect(warn).toContainText("{{name}}");
+  await expect(warn).toContainText("新增的变量");
+  await expect(warn).toContainText("{{user}}");
+
+  // 编辑结果：改回 {{name}} 后警告消失
+  const edited = "你好 {{name}}，请总结 {{text}}（已改）";
+  await result.fill(edited);
+  await expect(warn).toHaveCount(0);
+
+  // 另存
+  const sa = page.getByRole("form", { name: "另存为新 Prompt" });
+  await sa.getByLabel("标题").fill("优化版");
+  await sa.getByLabel("标签（可添加多个）").fill("优化");
+  await sa.getByLabel("标签（可添加多个）").press("Enter");
+  await sa.getByRole("button", { name: "另存" }).click();
+  await expect(sa.getByText("已另存为「优化版」")).toBeVisible();
+
+  await page.getByRole("button", { name: "Prompt 库", exact: true }).first().click();
+  await expect(cards(page).filter({ hasText: "优化版" })).toHaveCount(1);
+  await expect(page.getByTestId("prompt-body")).toHaveText(edited);
+  await page.getByRole("button", { name: "查看来源" }).click();
+  const src = page.locator(".source-body");
+  await expect(src).toContainText(original);
+  await expect(src).toContainText("去掉冗余表达");
+  await expect(src).toContainText("优化后：你好 {{user}}，请总结 {{text}}");
+
+  // 原条目不变：还在，且不是被覆盖（无来源的两条仍存在）
+  await expect(cards(page)).toHaveCount(3);
+  // 来源条目的编辑不改动 source_run_id
+  await page.getByRole("button", { name: "编辑" }).click();
+  await page.getByRole("form", { name: "编辑 Prompt" }).getByLabel("标题").fill("优化版-改");
+  await page.getByRole("button", { name: "保存" }).click();
+  await expect(page.getByRole("button", { name: "查看来源" })).toBeVisible();
+});
+
+test("失败后输入保留并重试成功", async ({ page, request }) => {
+  await login(page);
+  await page.getByRole("button", { name: "优化工作台" }).click();
+  await request.post("http://127.0.0.1:18081/__mode", { data: { fail: true } });
+  await page.getByLabel("原文").fill("失败重试 {{a}}");
+  await page.getByRole("button", { name: "开始优化" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "模型服务出错" })).toBeVisible();
+  await expect(page.getByLabel("原文")).toHaveValue("失败重试 {{a}}");
+  await expect(page.getByLabel("优化方案")).toHaveValue(/\d+/);
+
+  await request.post("http://127.0.0.1:18081/__mode", { data: { fail: false } });
+  await page.getByRole("button", { name: "重试优化" }).click();
+  await expect(page.getByLabel(/优化结果（可编辑）/)).toHaveValue("优化后：失败重试 {{a}}");
+  await expect(page.getByRole("alert").filter({ hasText: "模型服务出错" })).toHaveCount(0);
+});
+
+test("慢的旧请求在改输入或切方案后不污染当前状态", async ({ page }) => {
+  await login(page);
+  await page.getByRole("button", { name: "优化工作台" }).click();
+  await addScheme(page, "第二方案", "另一种");
+
+  // 改输入
+  await page.getByLabel("原文").fill("SLOW 旧输入");
+  await page.getByRole("button", { name: "开始优化" }).click();
+  await expect(page.getByRole("button", { name: /优化中/ })).toBeDisabled();
+  await page.getByLabel("原文").fill("新输入");
+  await expect(page.getByRole("button", { name: "开始优化" })).toBeEnabled();
+  await page.waitForTimeout(3500);
+  await expect(page.getByLabel(/优化结果（可编辑）/)).toHaveCount(0);
+  await expect(page.getByLabel("原文")).toHaveValue("新输入");
+
+  // 先得到一个当前结果，再让慢请求被方案切换作废
+  await page.getByRole("button", { name: "开始优化" }).click();
+  await expect(page.getByLabel(/优化结果（可编辑）/)).toHaveValue("优化后：新输入");
+  await page.getByLabel("原文").fill("SLOW 第二个");
+  await page.getByRole("button", { name: "开始优化" }).click();
+  await page.getByLabel("优化方案").selectOption({ label: "第二方案" });
+  await page.waitForTimeout(3500);
+  await expect(page.getByLabel(/优化结果（可编辑）/)).toHaveValue("优化后：新输入");
+  await expect(page.getByLabel("原文")).toHaveValue("SLOW 第二个");
+  await expect(page.getByRole("button", { name: "开始优化" })).toBeEnabled();
+});
+
+test("截图：桌面与窄屏", async ({ page }) => {
+  await login(page);
+  await page.getByRole("button", { name: "优化工作台" }).click();
+  await page.getByLabel("原文").fill("你好 {{name}}，请总结 {{text}}");
+  await page.getByRole("button", { name: "开始优化" }).click();
+  await expect(page.getByLabel(/优化结果（可编辑）/)).toBeVisible();
+  await page.screenshot({ path: "/tmp/prompts-web-workbench-desktop.png", fullPage: true });
+  await page.getByRole("button", { name: "Prompt 库", exact: true }).first().click();
+  await cards(page).first().click();
+  await page.screenshot({ path: "/tmp/prompts-web-library-desktop.png", fullPage: true });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: "/tmp/prompts-web-library-mobile.png", fullPage: true });
+  await page.getByRole("button", { name: "优化工作台" }).click();
+  await page.screenshot({ path: "/tmp/prompts-web-workbench-mobile.png", fullPage: true });
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+});
