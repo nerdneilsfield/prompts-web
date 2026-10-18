@@ -1,0 +1,111 @@
+# GoReleaser (OSS) configuration: tag-driven GitHub Releases for a single
+# static binary that already contains the built frontend inside it.
+#
+#   goreleaser check
+#   goreleaser release --snapshot --clean     # build all targets, publish nothing
+#
+# `main` carries no version variable, so no ldflags injection is claimed here:
+# metadata lives in the archive file names and in the Go build info.
+version: 2
+
+project_name: prompts-web
+
+before:
+  hooks:
+    # The binary embeds web/dist, so the frontend must exist before Go compiles.
+    # Run from a clean checkout this regenerates dist from source and the lockfile.
+    - bun install --frozen-lockfile
+    - bun run typecheck
+    - bun run build
+
+builds:
+  - id: prompts-web
+    main: ./cmd/server
+    binary: prompts-web
+    env:
+      # modernc.org/sqlite is pure Go, so no cgo and no per-platform toolchain.
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    # Strip only; there is no version variable in main to set.
+    ldflags:
+      - -s -w
+
+archives:
+  - id: default
+    ids:
+      - prompts-web
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    # Version, OS and arch in every file name.
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      # Explicit list, not globs: this is what a downloader actually needs, and
+      # it keeps internal notes, real .env files and data out of the archive.
+      - README.md
+      - .env.example
+      - docs/api.md
+      - docs/deploy.md
+      - docs/development.md
+      - docs/evaluation.md
+      - docs/releasing.md
+      - docs/images/library.png
+      - docs/images/workbench.png
+
+checksum:
+  # Default algorithm; the file is named checksums.txt.
+  name_template: "checksums.txt"
+
+# OCI image on GHCR, built from the same linux binaries as the archives.
+# One multi-arch manifest per tag (linux/amd64 + linux/arm64). Needs docker
+# buildx; the release workflow sets up QEMU and buildx on the runner.
+#
+# Build context (a temp dir GoReleaser assembles; it holds no source):
+#   Dockerfile.release
+#   linux/amd64/prompts-web
+#   linux/arm64/prompts-web
+#
+# Tags: stable v1.2.3 publishes v1.2.3 and latest; prerelease v1.2.3-rc.1
+# publishes only v1.2.3-rc.1. Snapshots build one image per platform locally,
+# tagged <version>-amd64 and <version>-arm64 (use --skip=docker to omit them).
+dockers_v2:
+  - id: ghcr
+    ids:
+      - prompts-web
+    dockerfile: Dockerfile.release
+    images:
+      - ghcr.io/nerdneilsfield/prompts-web
+    tags:
+      - "{{ .Tag }}"
+      - '{{ if and (not .IsSnapshot) (eq .Prerelease "") }}latest{{ end }}'
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      "org.opencontainers.image.title": "{{ .ProjectName }}"
+      "org.opencontainers.image.source": "https://github.com/nerdneilsfield/prompts-web"
+      "org.opencontainers.image.version": "{{ .Version }}"
+      "org.opencontainers.image.revision": "{{ .FullCommit }}"
+
+release:
+  # v1.2.3-rc.1 becomes a GitHub pre-release; v1.2.3 is a normal release.
+  prerelease: auto
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  # Generated from commit messages; nothing curated by hand.
+  use: github-native

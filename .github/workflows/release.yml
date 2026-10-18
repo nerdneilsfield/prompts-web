@@ -1,0 +1,60 @@
+name: release
+
+# Pushing a v* tag publishes, in one GoReleaser run:
+#   - the GitHub Release with six binary archives and checksums.txt
+#   - the multi-arch image ghcr.io/nerdneilsfield/prompts-web (linux/amd64, linux/arm64)
+# Ordinary commits do not run this workflow, and there is no manual dispatch.
+on:
+  push:
+    tags:
+      - "v*"
+
+# contents: write  -> create the GitHub Release and upload archives
+# packages: write  -> push the image to ghcr.io with GITHUB_TOKEN
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth 0: GoReleaser reads the full history for the changelog.
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      # Go version comes from go.mod.
+      - name: Set up Go
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+
+      # The binary embeds web/dist, so the frontend is built with Bun first.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version: 1.4.3
+
+      # QEMU and buildx let one runner build the linux/arm64 image.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4.4.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7.3.0
+        with:
+          version: "~> v2.18"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

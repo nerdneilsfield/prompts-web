@@ -1,0 +1,30 @@
+# syntax=docker/dockerfile:1
+# Runtime image for GoReleaser. GoReleaser builds the static binary (with the
+# frontend embedded) and places it in the build context under $TARGETPLATFORM:
+#
+#   linux/amd64/prompts-web
+#   linux/arm64/prompts-web
+#
+# The build context holds the binary and the files listed in dockers_v2.extra_files,
+# nothing else. For a build from source, use ./Dockerfile instead.
+FROM docker.io/library/alpine:3.22
+
+ARG TARGETPLATFORM
+
+# ca-certificates: the service calls an HTTPS model endpoint.
+RUN apk add --no-cache ca-certificates && \
+    adduser -D -u 10001 -h /app app && \
+    mkdir -p /data && chown app:app /data && chmod 0700 /data
+
+COPY ${TARGETPLATFORM}/prompts-web /usr/local/bin/prompts-web
+
+WORKDIR /app
+USER 10001:10001
+ENV DATA_DIR=/data \
+    LISTEN_ADDR=0.0.0.0:8080 \
+    APP_ORIGIN=http://localhost:8080
+VOLUME ["/data"]
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD wget -q -T 3 -t 1 -O /dev/null http://127.0.0.1:8080/api/session || exit 1
+ENTRYPOINT ["/usr/local/bin/prompts-web"]
