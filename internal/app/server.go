@@ -198,7 +198,7 @@ func (c *Client) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 
 func (c *Client) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	_, ok := c.session.lookup(c.cookieToken(r))
-	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": ok})
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": ok, "model_configured": c.cfg.modelConfigured()})
 }
 
 type loginRequest struct {
@@ -206,10 +206,14 @@ type loginRequest struct {
 }
 
 func (c *Client) handleLogin(w http.ResponseWriter, r *http.Request) {
+	// The quota is reserved before the body is read and before the password is
+	// compared, so concurrent guesses cannot all pass a stale check. A correct
+	// password releases the reservation.
 	ip := clientIP(r)
-	if retryAfter, blocked := c.limiter.blocked(ip, time.Now()); blocked {
+	retryAfter, admitted := c.limiter.reserve(ip, time.Now())
+	if !admitted {
 		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
-		fail(w, http.StatusTooManyRequests, "rate_limited", "too many failed login attempts")
+		fail(w, http.StatusTooManyRequests, "rate_limited", "too many login attempts")
 		return
 	}
 	var req loginRequest
@@ -217,7 +221,6 @@ func (c *Client) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(req.Password), []byte(c.cfg.Password)) != 1 {
-		c.limiter.fail(ip, time.Now())
 		fail(w, http.StatusUnauthorized, "unauthorized", "invalid password")
 		return
 	}

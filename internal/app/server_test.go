@@ -3,7 +3,9 @@ package app
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -326,6 +328,124 @@ func TestLoginLimiterBlocksAfterRepeatedFailures(t *testing.T) {
 	resp, _ = env.request(t, http.MethodPost, "/api/session", `{"password":"`+testPassword+`"}`, nil)
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("correct password while blocked: status = %d, want 429", resp.StatusCode)
+	}
+}
+
+// TestLoginLimiterHoldsUnderConcurrentAttempts is the regression for the original
+// race: the quota was checked before the body was read and the counter was only
+// updated after a wrong password, so simultaneous guesses all passed the check
+// and all reached the comparison. Every admitted attempt must now be counted.
+func TestLoginLimiterHoldsUnderConcurrentAttempts(t *testing.T) {
+	for _, max := range []int{1, 3} {
+		t.Run(strconv.Itoa(max), func(t *testing.T) {
+			env := newTestEnv(t, func(c *Config) {
+				c.LoginMaxFailures = max
+				c.LoginWindow = time.Minute
+			})
+
+			const attempts = 16
+			var reachedComparison atomic.Int64
+			// Count the attempts that actually get past the throttle by observing the
+			// password comparison indirectly: only an admitted attempt returns 401 (a
+			// rejected one returns 429), so the two status codes partition the racers.
+			type outcome struct{ status int }
+			results := make([]outcome, attempts)
+			var wg sync.WaitGroup
+			start := make(chan struct{})
+			for i := 0; i < attempts; i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					req, err := http.NewRequest(http.MethodPost, env.server.URL+"/api/session", strings.NewReader(`{"password":"wrong"}`))
+					if err != nil {
+						t.Errorf("build request: %v", err)
+						return
+					}
+					req.Header.Set("Content-Type", "application/json")
+					<-start
+					resp, err := env.server.Client().Do(req)
+					if err != nil {
+						t.Errorf("attempt %d: %v", i, err)
+						return
+					}
+					defer resp.Body.Close()
+					io.Copy(io.Discard, resp.Body)
+					results[i].status = resp.StatusCode
+					if resp.StatusCode == http.StatusUnauthorized {
+						reachedComparison.Add(1)
+					}
+				}(i)
+			}
+			close(start)
+			wg.Wait()
+
+			for i, r := range results {
+				if r.status != http.StatusUnauthorized && r.status != http.StatusTooManyRequests {
+					t.Fatalf("attempt %d status = %d, want 401 or 429", i, r.status)
+				}
+			}
+			if got := reachedComparison.Load(); got > int64(max) {
+				t.Fatalf("%d attempts reached the password comparison, limit is %d", got, max)
+			}
+			if got := reachedComparison.Load(); got != int64(max) {
+				t.Fatalf("admitted attempts = %d, want exactly %d (no quota left unused)", got, max)
+			}
+			// After the storm the throttle is still closed, and a correct password
+			// does not open it.
+			resp, _ := env.request(t, http.MethodPost, "/api/session", `{"password":"`+testPassword+`"}`, nil)
+			if resp.StatusCode != http.StatusTooManyRequests {
+				t.Fatalf("correct password after the storm: status = %d, want 429", resp.StatusCode)
+			}
+		})
+	}
+}
+
+// TestLoginLimiterAdmitsAgainAfterWindow checks the reservation is released on
+// success and expires with the window, so the throttle is not a permanent lock.
+func TestLoginLimiterAdmitsAgainAfterWindow(t *testing.T) {
+	env := newTestEnv(t, func(c *Config) {
+		c.LoginMaxFailures = 1
+		c.LoginWindow = 100 * time.Millisecond
+	})
+	resp, _ := env.request(t, http.MethodPost, "/api/session", `{"password":"wrong"}`, nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("first attempt status = %d, want 401", resp.StatusCode)
+	}
+	resp, _ = env.request(t, http.MethodPost, "/api/session", `{"password":"wrong"}`, nil)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second attempt status = %d, want 429", resp.StatusCode)
+	}
+	time.Sleep(150 * time.Millisecond)
+	resp, raw := env.request(t, http.MethodPost, "/api/session", `{"password":"`+testPassword+`"}`, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("after the window: status = %d, body %s", resp.StatusCode, raw)
+	}
+}
+
+func TestLoginLimiterReleasesQuotaOnSuccess(t *testing.T) {
+	env := newTestEnv(t, func(c *Config) {
+		c.LoginMaxFailures = 2
+		c.LoginWindow = time.Minute
+	})
+	resp, _ := env.request(t, http.MethodPost, "/api/session", `{"password":"wrong"}`, nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+	resp, _ = env.request(t, http.MethodPost, "/api/session", `{"password":"`+testPassword+`"}`, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status = %d, want 200", resp.StatusCode)
+	}
+	// The successful login cleared the record, so the full quota is available
+	// again rather than one attempt having been consumed.
+	for i := 0; i < 2; i++ {
+		resp, _ = env.request(t, http.MethodPost, "/api/session", `{"password":"wrong"}`, nil)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("attempt %d after success: status = %d, want 401", i, resp.StatusCode)
+		}
+	}
+	resp, _ = env.request(t, http.MethodPost, "/api/session", `{"password":"wrong"}`, nil)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("fourth attempt: status = %d, want 429", resp.StatusCode)
 	}
 }
 
@@ -785,6 +905,168 @@ func TestConcurrentSameRequestIDCallsUpstreamOnce(t *testing.T) {
 		if r.status == http.StatusOK && run.Status != RunSucceeded {
 			t.Fatalf("racer %d got 200 with status %q", i, run.Status)
 		}
+	}
+}
+
+func TestModelUnconfiguredDegradesGracefully(t *testing.T) {
+	env := newTestEnv(t, func(c *Config) {
+		c.BaseURL = ""
+		c.APIKey = ""
+		c.Model = ""
+	})
+
+	// The server must have started at all; NewServer is called by newTestEnv.
+	resp, raw := env.request(t, http.MethodGet, "/api/session", "", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("session status = %d, body %s", resp.StatusCode, raw)
+	}
+	session := decode[map[string]any](t, raw)
+	if session["authenticated"] != false {
+		t.Fatalf("authenticated = %v, want false", session["authenticated"])
+	}
+	if session["model_configured"] != false {
+		t.Fatalf("model_configured = %v, want false", session["model_configured"])
+	}
+
+	// A partial set is still unconfigured; all three fields are required.
+	partial := newTestEnv(t, func(c *Config) {
+		c.BaseURL = "https://api.example.com/v1"
+		c.APIKey = ""
+		c.Model = "m"
+	})
+	resp, raw = partial.request(t, http.MethodGet, "/api/session", "", nil)
+	if got := decode[map[string]any](t, raw)["model_configured"]; got != false {
+		t.Fatalf("partial config model_configured = %v, want false (status %d)", got, resp.StatusCode)
+	}
+
+	// Login, prompts and schemes all keep working without a model.
+	cookie := env.login(t)
+	resp, raw = env.request(t, http.MethodGet, "/api/session", "", cookieHeader(cookie))
+	if resp.StatusCode != http.StatusOK || decode[map[string]any](t, raw)["authenticated"] != true {
+		t.Fatalf("authenticated session: status %d body %s", resp.StatusCode, raw)
+	}
+	if got := decode[map[string]any](t, raw)["model_configured"]; got != false {
+		t.Fatalf("authenticated model_configured = %v, want false", got)
+	}
+
+	resp, raw = env.request(t, http.MethodPost, "/api/prompts", `{"title":"标题","body":"正文"}`, cookieHeader(cookie))
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create prompt status = %d, body %s", resp.StatusCode, raw)
+	}
+	scheme := createScheme(t, env, cookie, "方案", "正文")
+
+	// A new optimization is refused as unconfigured, with no upstream call and no
+	// running row left behind.
+	resp, raw = env.request(t, http.MethodPost, "/api/optimizations",
+		`{"request_id":"req-nomodel","input":"原文","scheme_id":`+itoa(scheme.ID)+`}`, cookieHeader(cookie))
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("optimize status = %d, want 503 (body %s)", resp.StatusCode, raw)
+	}
+	if code := errorCode(t, raw); code != "model_not_configured" {
+		t.Fatalf("code = %q, want model_not_configured", code)
+	}
+	if env.upstream.calls.Load() != 0 {
+		t.Fatalf("unconfigured optimize reached upstream %d times", env.upstream.calls.Load())
+	}
+	if _, err := env.store.Run("req-nomodel"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("unconfigured optimize left a run row: %v", err)
+	}
+
+	// A run recorded while the model was configured stays queryable and replayable
+	// once the endpoint is unconfigured, because replay never consults the model.
+	// That is the state a restart with a lost key produces.
+	if _, err := env.store.ClaimRun(Run{
+		RequestID: "req-existing", Input: "原文", SchemeID: scheme.ID,
+		SchemeName: scheme.Name, SchemeSnapshot: scheme.Body, Model: "old-model",
+	}); err != nil {
+		t.Fatalf("ClaimRun: %v", err)
+	}
+	if err := env.store.FinishRun("req-existing", RunSucceeded, "旧结果", ""); err != nil {
+		t.Fatalf("FinishRun: %v", err)
+	}
+	resp, raw = env.request(t, http.MethodGet, "/api/optimizations/req-existing", "", cookieHeader(cookie))
+	if resp.StatusCode != http.StatusOK || decode[Run](t, raw).Result != "旧结果" {
+		t.Fatalf("existing run unreadable while unconfigured: status %d body %s", resp.StatusCode, raw)
+	}
+	resp, raw = env.request(t, http.MethodPost, "/api/optimizations",
+		`{"request_id":"req-existing","input":"原文","scheme_id":`+itoa(scheme.ID)+`}`, cookieHeader(cookie))
+	if resp.StatusCode != http.StatusOK || decode[Run](t, raw).Result != "旧结果" {
+		t.Fatalf("replay while unconfigured: status %d body %s", resp.StatusCode, raw)
+	}
+	if env.upstream.calls.Load() != 0 {
+		t.Fatal("replay reached upstream")
+	}
+}
+
+func TestModelConfiguredIsReported(t *testing.T) {
+	env := newTestEnv(t, nil)
+	resp, raw := env.request(t, http.MethodGet, "/api/session", "", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if got := decode[map[string]any](t, raw)["model_configured"]; got != true {
+		t.Fatalf("model_configured = %v, want true", got)
+	}
+}
+
+// TestTerminalWriteFailureIsNotReportedAsSuccess covers the run that is claimed,
+// executed and then cannot be settled. The response must report the storage
+// failure instead of a 200 carrying a still-running row, and the model must not
+// be called again.
+//
+// The failure is injected through SQLite itself: the connection is put into
+// query_only mode while the model call is in flight, so writes fail and reads
+// still work. This is the case that matters, because reads working is what lets
+// the old code read back the unfinished row and return it as a 200. The test
+// exercises the real FinishRun path with no test hook.
+func TestTerminalWriteFailureIsNotReportedAsSuccess(t *testing.T) {
+	env := newTestEnv(t, nil)
+	cookie := env.login(t)
+	scheme := createScheme(t, env, cookie, "方案", "正文")
+
+	entered := make(chan struct{}, 1)
+	env.upstream.reply(func(w http.ResponseWriter, r *http.Request) {
+		entered <- struct{}{}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[{"message":{"content":"结果"}}]}`)
+	})
+
+	go func() {
+		<-entered
+		if _, err := env.store.db.Exec(`PRAGMA query_only=ON`); err != nil {
+			t.Errorf("enable query_only: %v", err)
+		}
+	}()
+
+	resp, raw := env.request(t, http.MethodPost, "/api/optimizations",
+		`{"request_id":"req-broken","input":"原文","scheme_id":`+itoa(scheme.ID)+`}`, cookieHeader(cookie))
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (body %s)", resp.StatusCode, raw)
+	}
+	if code := errorCode(t, raw); code != "internal" {
+		t.Fatalf("code = %q, want internal", code)
+	}
+	// The response must not claim a terminal state it failed to store: a 200 with
+	// status "running" is exactly the false success this guards against.
+	if bytes.Contains(raw, []byte(RunRunning)) || bytes.Contains(raw, []byte("结果")) {
+		t.Fatalf("500 response presented run state: %s", raw)
+	}
+	if got := env.upstream.calls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (no retry after a storage failure)", got)
+	}
+
+	// The row is still readable and still running, so a later GET can report the
+	// truth rather than a lost result.
+	if _, err := env.store.db.Exec(`PRAGMA query_only=OFF`); err != nil {
+		t.Fatalf("disable query_only: %v", err)
+	}
+	run, err := env.store.Run("req-broken")
+	if err != nil {
+		t.Fatalf("run should remain readable: %v", err)
+	}
+	if run.Status != RunRunning {
+		t.Fatalf("run status = %q, want still %q", run.Status, RunRunning)
 	}
 }
 
@@ -1259,9 +1541,6 @@ func TestNewServerRejectsBadConfig(t *testing.T) {
 		"no request ttl":  func(c *Config) { c.RequestTimeout = 0 },
 		"bad origin":      func(c *Config) { c.AllowedOrigins = []string{"prompts.example.com"} },
 		"no login window": func(c *Config) { c.LoginWindow = 0 },
-		"no model":        func(c *Config) { c.Model = "" },
-		"no api key":      func(c *Config) { c.APIKey = "" },
-		"no base url":     func(c *Config) { c.BaseURL = "" },
 	} {
 		cfg := base
 		mutate(&cfg)
@@ -1271,6 +1550,20 @@ func TestNewServerRejectsBadConfig(t *testing.T) {
 	}
 	if _, err := NewServer(nil, base, nil); err == nil {
 		t.Fatal("NewServer accepted a nil store")
+	}
+
+	// A missing or partial model config is not a startup error: the site runs
+	// without that feature and reports it through /api/session.
+	for name, mutate := range map[string]func(*Config){
+		"no model at all": func(c *Config) { c.BaseURL, c.APIKey, c.Model = "", "", "" },
+		"no api key":      func(c *Config) { c.APIKey = "" },
+		"no base url":     func(c *Config) { c.BaseURL = "" },
+	} {
+		cfg := base
+		mutate(&cfg)
+		if _, err := NewServer(store, cfg, nil); err != nil {
+			t.Fatalf("%s: NewServer refused to start: %v", name, err)
+		}
 	}
 }
 

@@ -46,6 +46,9 @@ type Config struct {
 	RequestTimeout time.Duration
 
 	// BaseURL is the OpenAI-compatible base, e.g. https://api.example.com/v1.
+	// BaseURL, APIKey and Model are all-or-nothing: an incomplete set leaves the
+	// model unconfigured. The library, the schemes and login still work without
+	// one, so a missing key degrades this feature instead of refusing to start.
 	BaseURL string
 	// APIKey authenticates upstream. It never leaves this process.
 	APIKey string
@@ -91,9 +94,6 @@ func (c Config) validate() error {
 	if c.LoginMaxFailures <= 0 || c.LoginWindow <= 0 {
 		return errors.New("LoginMaxFailures and LoginWindow must be positive")
 	}
-	if c.BaseURL == "" || c.APIKey == "" || c.Model == "" {
-		return errors.New("BaseURL, APIKey and Model are required")
-	}
 	for _, o := range c.AllowedOrigins {
 		if !strings.HasPrefix(o, "http://") && !strings.HasPrefix(o, "https://") {
 			return fmt.Errorf("AllowedOrigins entry %q must start with http:// or https://", o)
@@ -110,4 +110,9 @@ func (c Config) maxBodyBytes() int64 {
 		return c.MaxBodyBytes
 	}
 	return DefaultMaxBodyBytes
+}
+
+// modelConfigured reports whether every upstream field is present.
+func (c Config) modelConfigured() bool {
+	return c.BaseURL != "" && c.APIKey != "" && c.Model != ""
 }

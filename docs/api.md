@@ -31,21 +31,21 @@ http.ListenAndServe(":8080", handler)
 |---|---|---|---|
 | `Password` | `string` | 无，必填 | 全站单密码。仅后端持有。 |
 | `DBPath` | `string` | 无，必填 | SQLite 文件路径，持久化目录。 |
-| `CookieSecure` | `bool` | `false` | 会话 Cookie 的 `Secure` 标志。**生产必须 `true`**（HTTPS 反代）；仅本地 http 调试可 `false`。 |
+| `CookieSecure` | `bool` | `false` | 是否给会话 Cookie 加上 `Secure` 属性（仅 HTTPS 才回传）。**生产必须 `true`**（HTTPS 反代）；本地明文 HTTP 调试用 `false`。注意它只控制这一个属性：`false` 时 Cookie 照样下发，明文 HTTP 下浏览器也会发送它，区别仅是 HTTP 页面下不会被拒。任务 2 的主程序应据 `APP_ORIGIN` 自动推导该值，不新增环境变量旋钮。 |
 | `SessionTTL` | `time.Duration` | `24h` | 会话有效期。会话本身在内存中，重启即失效。 |
 | `AllowedOrigins` | `[]string` | 空 | 写请求允许的精确来源，形如 `https://prompts.example.com`。空表示只接受无 `Origin` 的请求（CLI）。每项必须以 `http://` 或 `https://` 开头。 |
-| `LoginMaxFailures` | `int` | `8` | 单个客户端 IP 在窗口内允许的失败登录次数，超出返回 429。 |
+| `LoginMaxFailures` | `int` | `8` | 单个客户端 IP 在窗口内允许的**登录尝试**次数（成功与失败都计入，成功会清零），超出返回 429。额度在读请求体之前原子预占，因此并发尝试不能靠时间差绕过。 |
 | `LoginWindow` | `time.Duration` | `10m` | 失败计数的滑动窗口。 |
 | `RequestTimeout` | `time.Duration` | `90s` | 单次上游模型调用上限。生产保持 90 秒；测试可设更短。 |
-| `BaseURL` | `string` | 无，必填 | OpenAI 兼容基址，如 `https://api.example.com/v1`。实际请求 `{BaseURL}/chat/completions`。 |
-| `APIKey` | `string` | 无，必填 | 上游密钥，作为 `Authorization: Bearer`。不写日志、不出现在任何响应。 |
-| `Model` | `string` | 无，必填 | 上游模型 id，写入每条运行记录。 |
+| `BaseURL` | `string` | 空 | OpenAI 兼容基址，如 `https://api.example.com/v1`。实际请求 `{BaseURL}/chat/completions`。`BaseURL`/`APIKey`/`Model` 三者全有才算已配置，缺任一即未配置（不阻止启动）。 |
+| `APIKey` | `string` | 空 | 上游密钥，作为 `Authorization: Bearer`。不写日志、不出现在任何响应。 |
+| `Model` | `string` | 空 | 上游模型 id，写入每条运行记录。 |
 | `Temperature` | `float64` | `0.2` | 实际发送并记录在 `params`。 |
 | `TopP` | `float64` | `1` | 同上。 |
 | `MaxTokens` | `int` | `2048` | 同上。 |
 | `MaxBodyBytes` | `int64` | `0`（即 1 MiB） | 单次请求体上限，超出返回 413。 |
 
-`NewServer` 会在缺失上述必填项或出现负值时返回错误，不启动半配置的服务。
+`NewServer` 只对真正无法服务的配置返回错误：缺 `Password`、缺 `DBPath`、非正的 `SessionTTL`/`RequestTimeout`/`LoginMaxFailures`/`LoginWindow`、格式非法的 `AllowedOrigins`、负的 `MaxBodyBytes`，以及 `store` 为 nil。**模型配置不是启动前提**：缺 `BaseURL`/`APIKey`/`Model` 时服务照常启动，登录、Prompt 库、方案与已有运行的查询全部可用，仅新的优化请求返回 503（见下）。
 
 ## 通用约定
 
@@ -63,13 +63,13 @@ http.ListenAndServe(":8080", handler)
 
 ### 鉴权
 
-除 `GET /api/session` 外，所有 `/api/*` 都需要会话 Cookie，否则 401 `unauthorized`。登录成功后服务端下发：
+除 `GET /api/session` 与 `POST /api/session`（登录本身）外，所有 `/api/*` 都需要会话 Cookie，否则 401 `unauthorized`。登录成功后服务端下发：
 
 ```
 Set-Cookie: session=<32 字节随机 hex>; Path=/; Max-Age=86400; HttpOnly; SameSite=Strict[; Secure]
 ```
 
-`Secure` 由 `CookieSecure` 决定。会话保存在内存，**进程重启后全部失效**（表现为一直 401，前端应引导重新登录）。客户端需带 Cookie 发请求（同源 fetch 加 `credentials: "same-origin"` 即可）。
+`Secure` 由 `CookieSecure` 决定，它只控制这一个属性。`CookieSecure=false` 时 Cookie 正常下发，明文 HTTP 与 HTTPS 下浏览器都会发送；差别仅是缺少 `Secure`，因而在 HTTP 页面上不会被拒绝。会话保存在内存，**进程重启后全部失效**（表现为一直 401，前端应引导重新登录）。客户端需带 Cookie 发请求（同源 fetch 加 `credentials: "same-origin"` 即可，`credentials: "include"` 也无妨）。
 
 ### 同源校验
 
@@ -85,10 +85,16 @@ Set-Cookie: session=<32 字节随机 hex>; Path=/; Max-Age=86400; HttpOnly; Same
 
 ### `GET /api/session`
 
-无需登录。用于启动时判断是否显示登录页。
+无需登录。用于启动时判断是否显示登录页，以及是否禁用“优化”入口。
 
-- `200 {"authenticated": true}` — Cookie 有效。
-- `200 {"authenticated": false}` — 无 Cookie、Cookie 未知或已过期。
+```json
+{"authenticated": false, "model_configured": true}
+```
+
+- `authenticated`：Cookie 是否有效。
+- `model_configured`：后端是否已配置完整的上游模型。为 `false` 时前端应禁用/隐藏“载入优化”，而不是等用户点下去才报错（登录后也应看这个字段，因为它与登录状态无关）。
+
+两种状态都返回 `200`；无 Cookie、Cookie 未知或已过期时 `authenticated` 为 `false`。
 
 ### `POST /api/session`
 
@@ -98,7 +104,7 @@ Set-Cookie: session=<32 字节随机 hex>; Path=/; Max-Age=86400; HttpOnly; Same
 
 - `200 {"authenticated": true}` + `Set-Cookie`。
 - `401 {"error":{"code":"unauthorized",...}}` — 密码错误。
-- `429 {"error":{"code":"rate_limited",...}}` + `Retry-After`（秒）— 该 IP 失败次数已达上限，**此时正确密码同样被拒**，直到窗口滑过。
+- `429 {"error":{"code":"rate_limited",...}}` + `Retry-After`（秒）— 该 IP 的尝试额度已用尽，**此时正确密码同样被拒**，直到窗口滑过（成功登录会清零计数）。额度在读取请求体和比对密码之前原子预占，因此并发尝试不能超出上限；代价是超限时连格式非法的请求体也返回 429。
 - `400 bad_request` — 空请求体或非法 JSON。
 
 ### `DELETE /api/session`
@@ -237,15 +243,30 @@ Run 对象：
 - `input`：原文，不能为空或全空白。
 - `scheme_id`：必须是已存在的方案（正整数）。首版**不接受内联方案正文**，方案由 `/api/schemes` 管理。
 
-响应始终是 `200` + Run 对象，**无论是成功还是模型失败**。失败通过 `status` + `error_kind` 表达，不使用 5xx：请求本身被正确受理了，是上游出错。
+响应是 `200` + Run 对象，**无论是成功还是模型失败**。失败通过 `status` + `error_kind` 表达：请求本身被正确受理了，是上游出错。只有**无法将终态写入数据库**时才返回 `500 internal`，因为此时后端无法诚实告知这次运行的结果。
 
 去重语义：
 
 - 首次使用某个 `request_id`：插入（唯一键）成功后才会调用上游。响应是本次执行的结果。
 - 同一 `request_id` 再次到达，且 `input` 与 `scheme_id` 都与记录一致：**不调用上游**，直接返回已有运行的状态与结果（幂等重放）。这是丢响应后的恢复路径。
 - 同一 `request_id`，但 `input` 或 `scheme_id` 与记录不同：`409 request_id_conflict`。一个 ID 不能代表两次不同的运行。
-- 并发同 ID：只有一个请求能插入成功并调用上游；其余立刻读到已有记录并按上面规则返回，绝不等待第一个请求完成，也绝不发起第二次上游调用。
 - 重放判定**只比对已记录的 `input` 与 `scheme_id`**，不读取当前方案正文。因此方案被改名或删除后，同 ID 重放依然返回原结果。
+
+#### 并发同 ID：`202` + `status: "running"`
+
+同一 `request_id` 的多个请求同时到达时（典型场景：用户重复点击、或超时后客户端自动重发），只有一个请求能插入成功并调用上游；其余**立刻**返回已有记录：
+
+- 已有记录已结算（`succeeded` / `failed` / `interrupted`）→ `200` + 该 Run 对象。
+- 已有记录仍 `running`（第一个请求还在调上游）→ **`202 Accepted` + `status: "running"` 的 Run 对象**。后端不等待、不阻塞、也不发起第二次上游调用。
+
+前端必须把 `202` + `running` 当作“已有另一个请求在跑，结果稍后才有”处理，**不要重试、不要轮询**：
+
+1. 不因 `202` 报错或自动重发（重发也只会再得到一个 `202`）。
+2. 保留输入，等**当前已有的那个请求**的响应（如果它是本页面发起的，它的响应带着终态）。
+3. 若当前请求是重发方向、不知道原请求结果（例如超时后发现 `202`），用 `GET /api/optimizations/{requestId}` **查一次**；若仍是 `running`，提示用户稍后手动刷新，不要定时轮询。
+4. `status != "running"` 即终态，此后无需再查。
+
+注意：`202` 只出现在同一 `request_id` 的并发场景；`input` 或 `scheme_id` 不同的重放是 `409`，不是 `202`。
 
 其他响应：
 
@@ -253,6 +274,8 @@ Run 对象：
 - `400 bad_scheme` — `scheme_id` 对应的方案不存在（仅在尚无该 ID 的运行记录时判定）。
 - `400` / `413` — 请求体非法 JSON、空、含多个 JSON 值、或超过 `MaxBodyBytes`。
 - `401 unauthorized` / `403 bad_origin` — 未登录或来源不允许。
+- `503 model_not_configured` — 后端未配置完整的模型（`GET /api/session` 的 `model_configured` 为 `false`），**且这个 `request_id` 尚无运行记录**。不调用上游，不插入 `running` 行。已有记录的查询与重放不受影响，仍正常返回。
+- `500 internal` — 终态无法写入数据库。此时模型**不会被重调**，运行行仍为 `running`，可用 `GET` 查询（若存储已恢复，启动扫描会将其标为 `interrupted`）。
 
 ### `GET /api/optimizations/{requestId}`
 
@@ -296,9 +319,10 @@ Run 对象：
 | `bad_origin` | 403 | `Origin` 与 `AllowedOrigins` 不匹配 |
 | `bad_scheme` | 400 | `scheme_id` 不存在 |
 | `bad_source_run` | 409 | `source_run_id` 不存在或其运行未成功 |
-| `internal` | 500 | 服务端故障，细节只在日志 |
+| `internal` | 500 | 服务端故障，细节只在日志。优化请求遇此错误时，终态未能写入，运行仍为 `running` |
 | `not_found` | 404 | 资源不存在 |
-| `rate_limited` | 429 | 登录失败次数超限 |
+| `model_not_configured` | 503 | 后端未配置完整模型，无法执行新的优化 |
+| `rate_limited` | 429 | 该 IP 的登录尝试额度已用尽 |
 | `request_id_conflict` | 409 | 同一 `request_id` 被用于不同的 `input`/`scheme_id` |
 | `too_large` | 413 | 请求体超过上限 |
 | `unauthorized` | 401 | 未登录或密码错误 |

@@ -45,12 +45,21 @@ func (c *Client) handleOptimize(w http.ResponseWriter, r *http.Request) {
 	// A repeated request ID is decided by the stored record alone: same submitted
 	// input and same submitted scheme_id replays the stored status and result,
 	// anything else is a conflict. The current scheme row is never consulted, so
-	// editing or deleting the scheme leaves replay intact.
+	// editing or deleting the scheme leaves replay intact. This runs before the
+	// model check so an already-recorded run stays readable and replayable even
+	// while the endpoint is unconfigured.
 	if existing, err := c.store.Run(requestID); err == nil {
 		c.replayRun(w, existing, req)
 		return
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		c.internal(w, "load existing run", err)
+		return
+	}
+
+	// A new run needs an upstream. Refuse without inserting a running row: an
+	// unconfigured endpoint is a server-side condition, not a failed attempt.
+	if !c.cfg.modelConfigured() {
+		fail(w, http.StatusServiceUnavailable, "model_not_configured", "model endpoint is not configured")
 		return
 	}
 
@@ -107,10 +116,13 @@ func (c *Client) handleOptimize(w http.ResponseWriter, r *http.Request) {
 	if kind != "" {
 		status = RunFailed
 	}
-	// The failure kind is what the client reads, so a lost write here would leave
-	// the run looking unfinished. It is logged rather than ignored.
-	if storeErr := c.store.FinishRun(requestID, status, result, kind); storeErr != nil {
-		c.log.Printf("error: finish run %s: %v", requestID, storeErr)
+	// The run must be settled before it is reported. If this write fails the row
+	// is still "running", and returning 200 with that row would claim a success or
+	// a classification the database does not hold. Report the storage failure and
+	// keep the row for a later GET instead. The model is not called again.
+	if err := c.store.FinishRun(requestID, status, result, kind); err != nil {
+		c.internal(w, "finish run", err)
+		return
 	}
 
 	stored, err := c.store.Run(requestID)
