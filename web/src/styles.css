@@ -146,6 +146,8 @@ main { padding: var(--space-lg); min-width: 0; max-width: 84rem; }
 @media (hover: hover) {
   .card:hover { background: var(--color-paper-2); }
 }
+/* .cards clips its children, so the ring is drawn inside the row. */
+.card:focus-visible { outline-offset: -3px; }
 .card.selected { background: var(--color-accent-soft); box-shadow: inset 2px 0 0 var(--color-accent); }
 .card.selected .chip:not(.active) { background: var(--color-surface); }
 .card strong { color: var(--color-ink); font-weight: 600; overflow-wrap: anywhere; }
@@ -185,8 +187,13 @@ button.chip-pick { min-height: 1.75rem; padding: 0 var(--space-2xs); font-size: 
   button.chip-pick.active:hover:not(:disabled) { background: var(--color-accent-hover); color: var(--color-accent-ink); }
 }
 .chip .count { opacity: 0.8; font-size: var(--text-xs); }
+.chip { min-width: 0; max-width: 100%; }
+button.chip-pick { max-width: 100%; }
+/* Long tags shrink and truncate (full text in the title); the count and × never shrink. */
+.chip-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip .count { flex: none; }
 .chip-edit { padding-right: 0; }
-.chip-edit button { border: 0; background: none; padding: 0 var(--space-2xs); min-height: 1.75rem; color: inherit; font-size: var(--text-md); }
+.chip-edit button { flex: none; border: 0; background: none; padding: 0 var(--space-2xs); min-height: 1.75rem; color: inherit; font-size: var(--text-md); }
 .filterbar { font-size: var(--text-sm); background: var(--color-accent-soft); color: var(--color-ink); border-radius: var(--radius-sm); padding: var(--space-2xs) var(--space-xs); }
 .filterbar b { margin-right: var(--space-2xs); font-weight: 600; }
 

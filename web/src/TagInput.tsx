@@ -25,7 +25,7 @@ export function TagInput({ tags, draft, onTags, onDraft }: Props) {
       <div className="chips">
         {tags.map((t) => (
           <span className="chip chip-edit" key={t}>
-            {t}
+            <span className="chip-label" title={t}>{t}</span>
             <button type="button" aria-label={`移除标签 ${t}`} onClick={() => onTags(tags.filter((x) => x !== t))}>
               ×
             </button>

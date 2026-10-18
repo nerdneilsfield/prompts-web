@@ -404,3 +404,65 @@ test("320/375/414/768 宽度：库与工作台无横向溢出、按钮不折行"
     }
   }
 });
+
+test("单条列表键盘聚焦的 ring 完整可见（不被 .cards 裁掉）", async ({ page }) => {
+  await login(page);
+  await newPrompt(page, "聚焦环唯一条目", "正文", []);
+  await page.getByLabel("搜索标题或正文").fill("聚焦环唯一条目");
+  await expect(cards(page)).toHaveCount(1);
+  for (let i = 0; i < 20; i++) {
+    await page.keyboard.press("Tab");
+    if (await page.evaluate(() => document.activeElement?.classList.contains("card"))) break;
+  }
+  const g = await page.evaluate(() => {
+    const el = document.activeElement as HTMLElement;
+    const s = getComputedStyle(el);
+    const r = el.getBoundingClientRect();
+    const c = el.closest(".cards")!.getBoundingClientRect();
+    const edge = parseFloat(s.outlineOffset) + parseFloat(s.outlineWidth); // outward reach of the ring
+    return {
+      isCard: el.classList.contains("card"),
+      style: s.outlineStyle,
+      left: r.left - edge - (c.left + 1), // 1px = .cards border
+      right: c.right - 1 - (r.right + edge),
+      top: r.top - edge - (c.top + 1),
+      bottom: c.bottom - 1 - (r.bottom + edge),
+    };
+  });
+  expect(g.isCard).toBe(true);
+  expect(g.style).toBe("solid");
+  for (const side of [g.left, g.right, g.top, g.bottom]) expect(side).toBeGreaterThanOrEqual(0);
+});
+
+test("320px：48 字符标签在编辑表单里 × 可见、可点、能清空并保存", async ({ page }) => {
+  await login(page);
+  await page.setViewportSize({ width: 320, height: 800 });
+  const long = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuv"; // 48 chars, one word
+  expect(long.length).toBe(48);
+  await newPrompt(page, "长标签条目", "正文", [long]);
+
+  // 详情 chip 和侧栏筛选 chip 不超出视口
+  for (const loc of [tagBar(page).getByRole("button", { name: new RegExp("^" + long.slice(0, 10)) }), page.getByLabel("Prompt 详情").getByRole("button", { name: new RegExp("^" + long.slice(0, 10)) })]) {
+    const box = (await loc.boundingBox())!;
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(320);
+  }
+
+  await page.getByRole("button", { name: "编辑" }).click();
+  const form = page.getByRole("form", { name: "编辑 Prompt" });
+  const remove = form.getByRole("button", { name: `移除标签 ${long}` });
+  await expect(remove).toBeVisible();
+  const box = (await remove.boundingBox())!;
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(320);
+  // 完整标签文字可读（title）
+  await expect(form.locator(".chip-label").first()).toHaveAttribute("title", long);
+
+  await remove.click(); // 真实点击，不是 force
+  await expect(remove).toHaveCount(0);
+  await form.getByRole("button", { name: "保存" }).click();
+  await expect(page.getByLabel("Prompt 详情").getByText("无标签")).toBeVisible();
+  await page.reload();
+  await cards(page).filter({ hasText: "长标签条目" }).click();
+  await expect(page.getByLabel("Prompt 详情").getByText("无标签")).toBeVisible();
+});

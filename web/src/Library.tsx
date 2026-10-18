@@ -25,7 +25,7 @@ function TagChip({ tag, active, onPick }: { tag: string; active: boolean; onPick
         onPick(tag);
       }}
     >
-      {tag}
+      <span className="chip-label" title={tag}>{tag}</span>
     </button>
   );
 }
@@ -312,7 +312,7 @@ export function Library({ version, authGen, focusId, modelConfigured, onLoadToWo
               aria-pressed={tag === t}
               onClick={() => pickTag(t)}
             >
-              {t} <span className="count">{n}</span>
+              <span className="chip-label" title={t}>{t}</span> <span className="count">{n}</span>
             </button>
           ))}
         </div>
