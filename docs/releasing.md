@@ -58,7 +58,7 @@ git tag v1.2.3
 git push origin v1.2.3
 ```
 
-标签以 `v` 开头，GoReleaser 据此得到版本号。推送标签触发 [`.github/workflows/release.yml`](../.github/workflows/release.yml)，工作流依次：
+标签以 `v` 开头，GoReleaser 据此得到版本号。推送标签触发 [`.github/workflows/release.yml`](https://github.com/nerdneilsfield/prompts-web/blob/main/.github/workflows/release.yml)，工作流依次：
 
 1. `actions/checkout` 以 `fetch-depth: 0` 取完整历史；
 2. `actions/setup-go` 按 `go.mod` 安装 Go；
