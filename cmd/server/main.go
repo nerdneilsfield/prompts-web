@@ -66,7 +66,7 @@ func run() error {
 	}
 
 	srv := &http.Server{
-		Addr:              env("LISTEN_ADDR", ":8080"),
+		Addr:              env("LISTEN_ADDR", "127.0.0.1:8080"),
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,

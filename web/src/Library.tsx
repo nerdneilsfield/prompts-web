@@ -141,12 +141,13 @@ function PromptForm({ initial, heading, onSubmit, onCancel, onDirty }: FormProps
 
 interface Props {
   version: number;
+  authGen: number;
   focusId: number | null;
   modelConfigured: boolean;
   onLoadToWorkbench: (body: string) => void;
 }
 
-export function Library({ version, focusId, modelConfigured, onLoadToWorkbench }: Props) {
+export function Library({ version, authGen, focusId, modelConfigured, onLoadToWorkbench }: Props) {
   const [all, setAll] = useState<Prompt[] | null>(null);
   const [filtered, setFiltered] = useState<Prompt[] | null>(null);
   const [err, setErr] = useState("");
@@ -157,6 +158,7 @@ export function Library({ version, focusId, modelConfigured, onLoadToWorkbench }
   const [mode, setMode] = useState<Mode>({ kind: "view" });
   const [notice, setNotice] = useState("");
   const [local, setLocal] = useState(0);
+  const [pendingFocus, setPendingFocus] = useState<number | null>(null);
   const dirty = useRef(false);
   const setDirty = useCallback((d: boolean) => {
     dirty.current = d;
@@ -174,7 +176,7 @@ export function Library({ version, focusId, modelConfigured, onLoadToWorkbench }
       })
       .catch((e) => !ac.signal.aborted && setErr(describeError(e)));
     return () => ac.abort();
-  }, [version, local]);
+  }, [version, local, authGen]);
 
   useEffect(() => {
     if (!filtering) {
@@ -193,14 +195,24 @@ export function Library({ version, focusId, modelConfigured, onLoadToWorkbench }
       })
       .catch((e) => !ac.signal.aborted && setErr(describeError(e)));
     return () => ac.abort();
-  }, [q, tag, filtering, version, local]);
+  }, [q, tag, filtering, version, local, authGen]);
 
+  // A new item saved from the workbench must not replace an open, unsaved form:
+  // park it and show it once the form is closed.
   useEffect(() => {
-    if (focusId !== null) {
+    if (focusId === null) return;
+    if (dirty.current) setPendingFocus(focusId);
+    else {
       setSelectedId(focusId);
       setMode({ kind: "view" });
     }
   }, [focusId]);
+  useEffect(() => {
+    if (pendingFocus !== null && mode.kind === "view") {
+      setSelectedId(pendingFocus);
+      setPendingFocus(null);
+    }
+  }, [pendingFocus, mode.kind]);
 
   useEffect(() => {
     const h = (e: BeforeUnloadEvent) => {
@@ -415,7 +427,7 @@ export function Library({ version, focusId, modelConfigured, onLoadToWorkbench }
             <p className="muted small" role="status">
               {notice}
             </p>
-            {selected.source_run_id && <SourceRun id={selected.source_run_id} />}
+            {selected.source_run_id && <SourceRun key={selected.source_run_id} id={selected.source_run_id} />}
           </article>
         )}
         {mode.kind === "view" && !selected && (

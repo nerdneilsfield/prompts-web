@@ -256,3 +256,135 @@ test("截图：桌面与窄屏", async ({ page }) => {
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
   expect(overflow).toBeLessThanOrEqual(0);
 });
+
+// ---- 审阅修复回归 ----
+
+const nav = (page: Page, name: string) => page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name });
+
+async function optimizeAndSave(page: Page, input: string, title: string) {
+  if (await page.getByLabel("优化方案").isDisabled()) await addScheme(page, "回归方案", "保持原意");
+  await page.getByLabel("原文").fill(input);
+  await page.getByRole("button", { name: "开始优化" }).click();
+  await expect(page.getByLabel(/优化结果（可编辑）/)).toHaveValue("优化后：" + input);
+  const sa = page.getByRole("form", { name: "另存为新 Prompt" });
+  await sa.getByLabel("标题").fill(title);
+  await sa.getByRole("button", { name: "另存" }).click();
+  await expect(sa.getByText(`已另存为「${title}」`)).toBeVisible();
+}
+
+test("库里未保存的表单不会被工作台另存冲掉", async ({ page }) => {
+  await login(page);
+  await page.getByRole("button", { name: "＋ 新增 Prompt" }).click();
+  const form = page.getByRole("form", { name: "新增 Prompt" });
+  await form.getByLabel("标题").fill("草稿标题");
+  await form.getByLabel("正文").fill("草稿正文");
+  await form.getByLabel("标签（可添加多个）").fill("draftTag");
+  await form.getByLabel("标签（可添加多个）").press("Enter");
+
+  await nav(page, "优化工作台").click();
+  await optimizeAndSave(page, "保留草稿用 {{x}}", "来自工作台");
+
+  await nav(page, "Prompt 库").click();
+  await expect(form).toBeVisible();
+  await expect(form.getByLabel("标题")).toHaveValue("草稿标题");
+  await expect(form.getByLabel("正文")).toHaveValue("草稿正文");
+  await expect(form.getByRole("button", { name: "移除标签 draftTag" })).toBeVisible();
+
+  // 放弃草稿后才处理延后的新条目
+  page.once("dialog", (d) => d.accept());
+  await form.getByRole("button", { name: "取消" }).click();
+  await expect(page.getByLabel("Prompt 详情").getByRole("heading", { name: "来自工作台" })).toBeVisible();
+});
+
+test("两个不同来源的 Prompt 不串来源内容", async ({ page }) => {
+  await login(page);
+  await nav(page, "优化工作台").click();
+  await optimizeAndSave(page, "甲的原文", "来源甲");
+  await optimizeAndSave(page, "乙的原文", "来源乙");
+
+  await nav(page, "Prompt 库").click();
+  await cards(page).filter({ hasText: "来源甲" }).click();
+  await page.getByRole("button", { name: "查看来源" }).click();
+  await expect(page.locator(".source-body")).toContainText("甲的原文");
+
+  await cards(page).filter({ hasText: "来源乙" }).click();
+  await expect(page.getByRole("heading", { name: "来源乙" })).toBeVisible();
+  await expect(page.locator(".source-body")).toHaveCount(0);
+  await page.getByRole("button", { name: "查看来源" }).click();
+  await expect(page.locator(".source-body")).toContainText("乙的原文");
+  await expect(page.locator(".source-body")).not.toContainText("甲的原文");
+});
+
+test("离开工作台即取消进行中的优化，迟到成功/失败都不污染", async ({ page, request }) => {
+  await login(page);
+  await nav(page, "优化工作台").click();
+  if (await page.getByLabel("优化方案").isDisabled()) await addScheme(page, "回归方案", "保持原意");
+
+  // 慢成功
+  await page.getByLabel("原文").fill("SLOW 切页成功");
+  await page.getByRole("button", { name: "开始优化" }).click();
+  await expect(page.getByRole("button", { name: /优化中/ })).toBeDisabled();
+  await nav(page, "Prompt 库").click();
+  await page.waitForTimeout(3500);
+  await nav(page, "优化工作台").click();
+  await expect(page.getByLabel(/优化结果（可编辑）/)).toHaveCount(0);
+  await expect(page.getByLabel("原文")).toHaveValue("SLOW 切页成功");
+  await expect(page.getByRole("button", { name: "开始优化" })).toBeEnabled();
+
+  // 慢失败
+  await request.post("http://127.0.0.1:18081/__mode", { data: { fail: true } });
+  try {
+    await page.getByLabel("原文").fill("SLOW 切页失败");
+    await page.getByRole("button", { name: "开始优化" }).click();
+    await expect(page.getByRole("button", { name: /优化中/ })).toBeDisabled();
+    await nav(page, "Prompt 库").click();
+    await page.waitForTimeout(3500);
+    await nav(page, "优化工作台").click();
+    await expect(page.getByRole("alert").filter({ hasText: "模型服务出错" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "开始优化" })).toBeEnabled();
+    await expect(page.getByLabel("原文")).toHaveValue("SLOW 切页失败");
+  } finally {
+    await request.post("http://127.0.0.1:18081/__mode", { data: { fail: false } });
+  }
+});
+
+test("会话失效后重新登录：搜索重载且保留未保存草稿", async ({ page, context }) => {
+  await login(page);
+  await newPrompt(page, "重登-代码评审", "评审代码", []);
+  await newPrompt(page, "重登-别的", "无关内容", []);
+  await page.getByRole("button", { name: "＋ 新增 Prompt" }).click();
+  const form = page.getByRole("form", { name: "新增 Prompt" });
+  await form.getByLabel("标题").fill("重登草稿");
+
+  await context.clearCookies();
+  await page.getByLabel("搜索标题或正文").fill("重登-代");
+  await expect(page.getByText(/未保存的内容仍保留/)).toBeVisible();
+  await page.getByLabel("站点密码").fill("secret");
+  await page.getByRole("button", { name: "登录" }).click();
+
+  await expect(cards(page)).toHaveCount(1);
+  await expect(cards(page).first()).toContainText("重登-代码评审");
+  await expect(page.getByRole("alert").filter({ hasText: "登录已失效" })).toHaveCount(0);
+  await expect(form.getByLabel("标题")).toHaveValue("重登草稿");
+});
+
+test("方案初始加载遇 401，重新登录后恢复", async ({ page }) => {
+  let failed = false;
+  await page.route("**/api/schemes", async (route) => {
+    if (!failed && route.request().method() === "GET") {
+      failed = true;
+      await route.fulfill({ status: 401, contentType: "application/json", body: JSON.stringify({ error: { code: "unauthorized", message: "x" } }) });
+    } else await route.continue();
+  });
+  await page.goto("/");
+  await page.getByLabel("站点密码").fill("secret");
+  await page.getByRole("button", { name: "登录" }).click();
+  await expect.poll(() => failed).toBe(true);
+  await expect(page.getByText(/未保存的内容仍保留/)).toBeVisible();
+  await page.getByLabel("站点密码").fill("secret");
+  await page.getByRole("button", { name: "登录" }).click();
+
+  await nav(page, "优化工作台").click();
+  await expect(page.getByLabel("优化方案")).toHaveValue(/\d+/);
+  await expect(page.getByRole("alert").filter({ hasText: "登录已失效" })).toHaveCount(0);
+});

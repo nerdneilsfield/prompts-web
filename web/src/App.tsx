@@ -51,6 +51,7 @@ export function App() {
   const [tab, setTab] = useState<"library" | "workbench">("library");
   const [incoming, setIncoming] = useState<{ text: string; n: number } | null>(null);
   const [version, setVersion] = useState(0);
+  const [authGen, setAuthGen] = useState(0);
   const [focusId, setFocusId] = useState<number | null>(null);
   const n = useRef(0);
 
@@ -85,7 +86,15 @@ export function App() {
 
   return (
     <>
-      {!authed && <Login onLogin={setSession} expired={everIn} />}
+      {!authed && (
+        <Login
+          onLogin={(s) => {
+            setAuthGen((g) => g + 1);
+            setSession(s);
+          }}
+          expired={everIn}
+        />
+      )}
       {(authed || everIn) && (
         <div className="shell" hidden={!authed}>
           <nav className="side" aria-label="主导航">
@@ -105,6 +114,7 @@ export function App() {
             <div hidden={tab !== "library"}>
               <Library
                 version={version}
+                authGen={authGen}
                 focusId={focusId}
                 modelConfigured={session.model_configured}
                 onLoadToWorkbench={toWorkbench}
@@ -113,6 +123,8 @@ export function App() {
             <div hidden={tab !== "workbench"}>
               <Workbench
                 modelConfigured={session.model_configured}
+                active={tab === "workbench"}
+                authGen={authGen}
                 incoming={incoming}
                 onSaved={(p) => {
                   setVersion((v) => v + 1);

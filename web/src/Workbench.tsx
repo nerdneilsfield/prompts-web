@@ -16,6 +16,8 @@ import { charCount, charDiff, copyText, placeholderDelta } from "./text";
 
 interface Props {
   modelConfigured: boolean;
+  active: boolean;
+  authGen: number;
   incoming: { text: string; n: number } | null;
   onSaved: (p: Prompt) => void;
 }
@@ -104,7 +106,7 @@ function SaveAs({ run, text, onSaved }: { run: Run; text: string; onSaved: (p: P
   );
 }
 
-export function Workbench({ modelConfigured, incoming, onSaved }: Props) {
+export function Workbench({ modelConfigured, active, authGen, incoming, onSaved }: Props) {
   const [input, setInput] = useState("");
   const [schemes, setSchemes] = useState<Scheme[] | null>(null);
   const [schemeId, setSchemeId] = useState<number | null>(null);
@@ -141,10 +143,16 @@ export function Workbench({ modelConfigured, incoming, onSaved }: Props) {
       setLoadErr(describeError(e));
     }
   };
+  // Re-run after a re-login so a load that failed with 401 recovers; the draft stays.
   useEffect(() => {
     void loadSchemes();
-    return () => abort.current?.abort();
-  }, []);
+  }, [authGen]);
+  useEffect(() => () => abort.current?.abort(), []);
+
+  // Leaving the page cancels in-flight work and drops its result; the draft stays.
+  useEffect(() => {
+    if (!active) invalidate();
+  }, [active]);
 
   useEffect(() => {
     if (!incoming) return;
