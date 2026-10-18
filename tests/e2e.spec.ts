@@ -388,3 +388,19 @@ test("方案初始加载遇 401，重新登录后恢复", async ({ page }) => {
   await expect(page.getByLabel("优化方案")).toHaveValue(/\d+/);
   await expect(page.getByRole("alert").filter({ hasText: "登录已失效" })).toHaveCount(0);
 });
+
+test("320/375/414/768 宽度：库与工作台无横向溢出、按钮不折行", async ({ page }) => {
+  await login(page);
+  await newPrompt(page, "响应式-标题很长很长很长很长很长很长很长很长很长很长很长很长很长", "正文".repeat(60), ["很长的标签名称很长很长", "b", "c"]);
+  for (const width of [320, 375, 414, 768]) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const name of ["Prompt 库", "优化工作台"]) {
+      await nav(page, name).click();
+      const m = await page.evaluate(() => ({
+        over: document.documentElement.scrollWidth - window.innerWidth,
+        wrapped: [...document.querySelectorAll("button")].filter((b) => b.offsetParent && b.getBoundingClientRect().height > 60).map((b) => b.textContent),
+      }));
+      expect(m, `${name} @${width}`).toEqual({ over: 0, wrapped: [] });
+    }
+  }
+});

@@ -93,7 +93,7 @@ function SaveAs({ run, text, onSaved }: { run: Run; text: string; onSaved: (p: P
         {err}
       </p>
       <div className="row">
-        <button type="submit" className="primary" disabled={busy}>
+        <button type="submit" className="primary" disabled={busy} aria-busy={busy}>
           另存
         </button>
       </div>
@@ -236,7 +236,7 @@ export function Workbench({ modelConfigured, active, authGen, incoming, onSaved 
           <label htmlFor="wb-input">原文</label>
           <textarea
             id="wb-input"
-            rows={10}
+            rows={6}
             value={input}
             onChange={(e) => {
               invalidate();
@@ -267,7 +267,7 @@ export function Workbench({ modelConfigured, active, authGen, incoming, onSaved 
               ))}
             </select>
           </div>
-          <button type="button" className="primary" onClick={optimize} disabled={!canRun}>
+          <button type="button" className="primary" onClick={optimize} disabled={!canRun} aria-busy={loading}>
             {loading ? "优化中…（最长约 90 秒）" : error ? "重试优化" : "开始优化"}
           </button>
         </div>

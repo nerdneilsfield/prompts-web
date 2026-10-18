@@ -93,7 +93,7 @@ export function Schemes({ schemes, onChanged }: Props) {
             <textarea id="sc-body" rows={5} value={body} onChange={(e) => setBody(e.target.value)} />
           </div>
           <div className="row">
-            <button type="submit" className="primary" disabled={busy}>
+            <button type="submit" className="primary" disabled={busy} aria-busy={busy}>
               保存方案
             </button>
             <button type="button" onClick={() => setEditing(null)} disabled={busy}>

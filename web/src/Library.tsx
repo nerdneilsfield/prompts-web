@@ -128,7 +128,7 @@ function PromptForm({ initial, heading, onSubmit, onCancel, onDirty }: FormProps
         {err}
       </p>
       <div className="row">
-        <button type="submit" className="primary" disabled={busy}>
+        <button type="submit" className="primary" disabled={busy} aria-busy={busy}>
           {busy ? "保存中…" : "保存"}
         </button>
         <button type="button" onClick={onCancel} disabled={busy}>

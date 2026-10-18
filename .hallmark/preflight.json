@@ -1,0 +1,12 @@
+{
+  "date": "2026-10-18",
+  "scope": "redesign (existing app, in place)",
+  "framework": "React 19 + Vite 8 + TypeScript (package.json)",
+  "fonts_before": "system stack only (web/src/styles.css :root font-family)",
+  "palette_before": "warm paper #faf7f0 + blue #2f5fb3, hex literals in web/src/styles.css L2-11",
+  "motion": "motion-cut (no framer-motion/gsap/motion in package.json)",
+  "spacing_before": "raw px, no scale",
+  "design_md": "none before this run",
+  "preserve": ["component boundaries", "class names and DOM roles used by tests/e2e.spec.ts", "all business logic", "copy intent"],
+  "introduce": ["tokens.css", "local font-face (latin subsets, Space Grotesk / Inter / JetBrains Mono)", "design.md", "state styling for loading/error/success/disabled"]
+}
