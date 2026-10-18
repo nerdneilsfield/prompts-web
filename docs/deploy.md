@@ -1,6 +1,6 @@
 # 部署
 
-本页介绍如何长期运行这个站点：环境变量、Apple container、Compose + HTTPS、可信反向代理，以及备份、恢复和升级。
+本页介绍如何长期运行这个站点：环境变量、二进制与容器镜像、Compose + HTTPS、可信反向代理，以及备份、恢复和升级。
 最短的启动方式见 [`README.md`](../README.md)。
 
 站点是单实例：SQLite 使用单连接，登录会话保存在进程内存里。每份数据目录只运行一个进程。
@@ -17,7 +17,7 @@
 | `DATA_DIR` | `./data` | SQLite 目录，文件名固定为 `prompts.db`，目录权限按 `0700` 创建。 |
 | `LISTEN_ADDR` | `127.0.0.1:8080` | 监听地址。直接运行二进制时只接受本机连接。 |
 | `TRUST_PROXY` | `false` | 设为 `true` 时，登录限速读取 `X-Real-IP` 作为访客地址。条件见下节。 |
-| `LLM_BASE_URL` | 空 | OpenAI 兼容地址，实际请求 `{LLM_BASE_URL}/chat/completions`。 |
+| `LLM_BASE_URL` | 空 | Go 后端访问的 OpenAI 兼容 API 根地址，后端请求 `{LLM_BASE_URL}/chat/completions`。可用公网域名或局域网地址，取决于运行后端的机器能否连上。 |
 | `LLM_API_KEY` | 空 | 上游密钥，以 `Authorization: Bearer` 发送。 |
 | `LLM_MODEL` | 空 | 上游模型名，记录在每次运行里。 |
 
@@ -44,7 +44,25 @@
 
 应用端口对宿主机发布，或直接面向外网时，保持 `TRUST_PROXY=false`。给 `app` 服务加 `ports:` 之前，先把 `TRUST_PROXY` 改回 `false`。
 
-## 发布的镜像
+## 二进制
+
+从 GitHub Release 下载对应系统和架构的归档，核对并解包：
+
+```bash
+shasum -a 256 -c checksums.txt --ignore-missing
+tar xzf prompts-web_0.1.0_linux_amd64.tar.gz
+```
+
+启动时设置环境变量。要接受其他机器的访问，把 `LISTEN_ADDR` 设为 `0.0.0.0:8080`，`APP_ORIGIN` 写用户在浏览器里输入的地址：
+
+```bash
+APP_PASSWORD='换成你的密码' APP_ORIGIN=http://你的主机名:8080 \
+LISTEN_ADDR=0.0.0.0:8080 DATA_DIR=/var/lib/prompts-web ./prompts-web
+```
+
+长期运行时交给 systemd、launchd 等进程管理器，把环境变量写进它的配置。
+
+## 容器镜像
 
 镜像 `ghcr.io/nerdneilsfield/prompts-web` 由 GoReleaser 在推送 `v*` 标签时发布，包含 `linux/amd64` 与 `linux/arm64`。
 标签规则：稳定版 `v1.2.3` 得到 `v1.2.3` 和 `latest`；预发布版 `v1.2.3-rc.1` 只得到 `v1.2.3-rc.1`。
@@ -60,9 +78,7 @@ docker run -d --name prompts-web -p 8080:8080 \
   ghcr.io/nerdneilsfield/prompts-web:latest
 ```
 
-Docker 初次使用命名卷时，会把镜像里 `/data` 的内容和属主（10001）复制到卷中，这是 Docker 的标准行为，本文档的作者没有在 Docker daemon 上实际执行。如果启动日志出现 `unable to open database file`，按下节 Apple container 的做法先一次性执行 `chown 10001:10001 /data`。
-
-用宿主目录时，目录属主需要是 10001：
+用宿主目录保存数据时，目录属主设为 10001：
 
 ```bash
 mkdir -p /srv/prompts-web && sudo chown 10001:10001 /srv/prompts-web
@@ -70,59 +86,11 @@ docker run -d -p 8080:8080 -e APP_PASSWORD='换成你的密码' -e APP_ORIGIN=ht
   -v /srv/prompts-web:/data ghcr.io/nerdneilsfield/prompts-web:latest
 ```
 
-新仓库的 GHCR 包默认是私有的。维护者首次发布后，打开 GitHub 上的包页面 → Package settings → Danger Zone → Change visibility → Public，匿名用户即可 `docker pull`。
+命名卷首次挂载时，Docker 把镜像里 `/data` 的内容和属主复制进卷。若卷由其他方式创建，属主是 root，启动日志出现 `unable to open database file`，先对卷执行一次 `chown 10001:10001 /data`。
 
-本地用 Apple container 运行同一个镜像，把 `docker` 换成 `container`，命名卷的属主处理见下节。
+后端访问 `LLM_BASE_URL` 的网络由容器所在主机决定。模型服务在宿主机或局域网上时，填容器内可达的地址。
 
-## Apple container
-
-前置命令：
-
-```bash
-container system start
-container builder start
-```
-
-在仓库根目录构建镜像：
-
-```bash
-container build -f Dockerfile -t prompts-web:local .
-```
-
-镜像分三段：Bun 阶段执行 `bun install --frozen-lockfile` 与 `bun run build`；Go 阶段编译并嵌入 `web/dist`；
-运行阶段是 `alpine:3.22`，只含静态二进制和 CA 证书，以 uid 10001 运行。
-
-用宿主目录保存数据，在 19080 端口启动：
-
-```bash
-mkdir -p /tmp/prompts-web-data
-
-container run -d --name prompts-web -p 19080:8080 \
-  -e APP_PASSWORD='换成你的密码' \
-  -e APP_ORIGIN=http://127.0.0.1:19080 \
-  -v /tmp/prompts-web-data:/data \
-  prompts-web:local
-```
-
-检查与停止：
-
-```bash
-curl -sS http://127.0.0.1:19080/api/session
-container logs prompts-web
-container stop prompts-web && container rm prompts-web
-```
-
-宿主目录挂载后，容器内可直接读写，`prompts.db` 属于宿主用户。
-命名卷由 root 创建，挂到 `/data` 前需要把属主交给 10001：
-
-```bash
-container volume create prompts-web-data
-container run --rm --uid 0 -v prompts-web-data:/data --entrypoint sh prompts-web:local \
-  -c 'chown 10001:10001 /data'
-container run -d --name prompts-web -p 19080:8080 \
-  -e APP_PASSWORD='换成你的密码' -e APP_ORIGIN=http://127.0.0.1:19080 \
-  -v prompts-web-data:/data prompts-web:local
-```
+Podman、Apple container 等 OCI 客户端使用同一个镜像，参数与上面一致。Apple container 的构建、运行和备份命令见 [`apple-container.md`](apple-container.md)。
 
 ## Compose + HTTPS
 
@@ -152,50 +120,45 @@ docker compose up -d --build
 ### 宿主目录
 
 ```bash
-container stop prompts-web
-tar czf /tmp/prompts-web-backup-$(date +%F).tar.gz -C /tmp/prompts-web-data .
-container start prompts-web
+docker stop prompts-web
+tar czf prompts-web-backup-$(date +%F).tar.gz -C /srv/prompts-web .
+docker start prompts-web
 ```
 
 恢复到一个新目录，用它启动：
 
 ```bash
-mkdir -p /tmp/prompts-web-data-restored
-tar xzf /tmp/prompts-web-backup-2026-10-18.tar.gz -C /tmp/prompts-web-data-restored
-container stop prompts-web && container rm prompts-web
-container run -d --name prompts-web -p 19080:8080 \
-  -e APP_PASSWORD='换成你的密码' -e APP_ORIGIN=http://127.0.0.1:19080 \
-  -v /tmp/prompts-web-data-restored:/data prompts-web:local
+mkdir -p /srv/prompts-web-restored
+tar xzf prompts-web-backup-2026-10-18.tar.gz -C /srv/prompts-web-restored
+sudo chown -R 10001:10001 /srv/prompts-web-restored
+docker stop prompts-web && docker rm prompts-web
+docker run -d --name prompts-web -p 8080:8080 \
+  -e APP_PASSWORD='换成你的密码' -e APP_ORIGIN=http://127.0.0.1:8080 \
+  -v /srv/prompts-web-restored:/data ghcr.io/nerdneilsfield/prompts-web:latest
 ```
 
 解包会覆盖目标目录里同名文件，先确认目标目录是空的。
 
-### Apple container 命名卷
+### Docker 命名卷
 
 ```bash
-container stop prompts-web
-
-mkdir -p /tmp/prompts-web-backups
-container run --rm --uid 0 \
-  -v prompts-web-data:/data:ro \
-  -v /tmp/prompts-web-backups:/backup \
-  --entrypoint sh prompts-web:local \
+docker stop prompts-web
+mkdir -p "$PWD/backups"
+docker run --rm --user 0:0 -v prompts-web-data:/data:ro -v "$PWD/backups:/backup" \
+  --entrypoint sh ghcr.io/nerdneilsfield/prompts-web:latest \
   -c 'tar czf /backup/prompts-web-backup.tar.gz -C /data .'
 ```
 
 恢复到另一个卷：
 
 ```bash
-container volume create prompts-web-data-restored
-container run --rm --uid 0 -v prompts-web-data-restored:/data \
-  --entrypoint sh prompts-web:local -c 'chown 10001:10001 /data'
-container run --rm --uid 0 \
-  -v prompts-web-data-restored:/data -v /tmp/prompts-web-backups:/backup \
-  --entrypoint sh prompts-web:local \
-  -c 'tar xzf /backup/prompts-web-backup.tar.gz -C /data'
+docker volume create prompts-web-data-restored
+docker run --rm --user 0:0 -v prompts-web-data-restored:/data -v "$PWD/backups:/backup" \
+  --entrypoint sh ghcr.io/nerdneilsfield/prompts-web:latest \
+  -c 'tar xzf /backup/prompts-web-backup.tar.gz -C /data && chown -R 10001:10001 /data'
 ```
 
-`--entrypoint sh` 必须保留，否则 `-c ...` 会被当作服务参数。`--uid 0` 让 `tar` 读取卷内全部文件。
+`--entrypoint sh` 保留在命令里，`-c ...` 才会交给 shell 执行。`--user 0:0` 让 `tar` 读取卷内全部文件。
 
 ### Compose 命名卷
 
@@ -223,10 +186,10 @@ docker compose run --rm --no-deps --user 0:0 \
 ```bash
 docker volume create prompts-web_app-data-restored
 docker run --rm --user 0:0 -v prompts-web_app-data-restored:/data \
-  --entrypoint sh prompts-web:local -c 'chown 10001:10001 /data'
+  --entrypoint sh ghcr.io/nerdneilsfield/prompts-web:latest -c 'chown 10001:10001 /data'
 docker run --rm --user 0:0 \
   -v prompts-web_app-data-restored:/data -v "$PWD/backups:/backup" \
-  --entrypoint sh prompts-web:local \
+  --entrypoint sh ghcr.io/nerdneilsfield/prompts-web:latest \
   -c 'tar xzf /backup/prompts-web-backup.tar.gz -C /data'
 ```
 
@@ -250,14 +213,10 @@ docker compose -f compose.yaml -f compose.restore.yaml stop app
 要去掉第二个 `-f`，把 `compose.yaml` 末尾的 `app-data:` 改成 `app-data: { name: prompts-web_app-data-restored }`，
 用 `docker compose config` 确认卷名后再删除 `compose.restore.yaml`。
 
-本页的 Compose 命令在 macOS 上用 `docker compose config` 做了静态解析：卷名解析为 `prompts-web_app-data`；
-加上 `compose.restore.yaml` 后，`/data` 只有一个挂载，指向 `prompts-web_app-data-restored`。
-Apple container 的备份、恢复、重启读取在 Apple container 1.0 上实际运行过。
-
 ## 升级
 
 1. 按上节备份。
-2. 构建新镜像，或替换二进制：从 GitHub Release 下载归档，用同一页的 `checksums.txt` 核对 SHA256，再解包替换旧二进制。
+2. 更新程序：镜像用 `docker pull ghcr.io/nerdneilsfield/prompts-web:latest` 后重建容器；二进制从 GitHub Release 下载归档，用同一页的 `checksums.txt` 核对 SHA256，再解包替换旧二进制；Compose 用 `docker compose up -d --build`。
 3. 启动，访问 `/api/session`，用原密码登录，确认 Prompt 都在。
 
 新版本启动时把库里遗留的 `running` 运行标记为 `interrupted`，并创建缺少的表，没有其他迁移步骤，数据目录保持不动。

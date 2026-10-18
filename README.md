@@ -1,7 +1,7 @@
 # Prompt 库与优化工作台
 
 收纳提示词，按标签和关键词查找，用优化方案改写，再对照原文编辑并另存。
-一个二进制，一个 SQLite 文件，一个站点密码，适合放在自己的机器上长期使用。
+一个二进制，一个 SQLite 文件，一个站点密码，自托管。
 
 ![Prompt 库](docs/images/library.png)
 
@@ -20,6 +20,35 @@
 
 ## 快速开始
 
+三种运行方式，任选一种。浏览器打开 <http://127.0.0.1:8080>，用 `APP_PASSWORD` 登录。`APP_ORIGIN` 填浏览器地址栏里的地址，写请求按它校验来源。
+
+### 容器镜像
+
+`ghcr.io/nerdneilsfield/prompts-web` 支持 `linux/amd64` 与 `linux/arm64`，标签与 Git 标签一致（如 `v0.1.0`），稳定版同时带 `latest`。
+
+```bash
+docker run -d --name prompts-web -p 8080:8080 \
+  -e APP_PASSWORD='换成你的密码' \
+  -e APP_ORIGIN=http://127.0.0.1:8080 \
+  -v prompts-web-data:/data \
+  ghcr.io/nerdneilsfield/prompts-web:latest
+```
+
+数据保存在命名卷 `prompts-web-data`。镜像遵循 OCI 规范，Podman、Apple container 等客户端用同一个镜像和参数，示例见 [`docs/apple-container.md`](docs/apple-container.md)。
+
+### 发布的二进制
+
+从 [Releases](https://github.com/nerdneilsfield/prompts-web/releases) 下载对应系统和架构的归档（Linux、macOS、Windows，amd64 与 arm64），用 `checksums.txt` 核对 SHA256。
+
+```bash
+tar xzf prompts-web_0.1.0_linux_amd64.tar.gz
+APP_PASSWORD='换成你的密码' APP_ORIGIN=http://127.0.0.1:8080 ./prompts-web
+```
+
+Windows 归档是 `.zip`，可执行文件为 `prompts-web.exe`。
+
+### 从源码构建
+
 环境：Go 1.26、Bun 1.4.3。
 
 ```bash
@@ -29,32 +58,15 @@ bun install --frozen-lockfile
 bun run build
 go build -o bin/server ./cmd/server
 
-APP_PASSWORD='换成你的密码' APP_ORIGIN='http://127.0.0.1:8080' ./bin/server
+APP_PASSWORD='换成你的密码' APP_ORIGIN=http://127.0.0.1:8080 ./bin/server
 ```
-
-浏览器打开 <http://127.0.0.1:8080>，用 `APP_PASSWORD` 登录。
 
 `bun run build` 生成 `web/dist`，`go build` 把它嵌入二进制，所以两步按这个顺序执行。
-`APP_ORIGIN` 填写浏览器地址栏里的地址，写请求按它校验来源。用别的地址访问时，同步修改它，例如 `http://192.168.1.20:8080`。
-数据保存在 `DATA_DIR`（默认 `./data`）下的 `prompts.db`。
 
-环境变量在启动时读取，修改后重启进程生效。完整变量表见 [`docs/deploy.md`](docs/deploy.md)。
+### 配置
 
-### 使用镜像
-
-发布的镜像是 `ghcr.io/nerdneilsfield/prompts-web`，支持 `linux/amd64` 与 `linux/arm64`，标签与 Git 标签一致（如 `v1.2.3`），稳定版同时带 `latest`。
-
-```bash
-docker pull ghcr.io/nerdneilsfield/prompts-web:latest
-
-docker run -d --name prompts-web -p 8080:8080 \
-  -e APP_PASSWORD='换成你的密码' \
-  -e APP_ORIGIN=http://127.0.0.1:8080 \
-  -v prompts-web-data:/data \
-  ghcr.io/nerdneilsfield/prompts-web:latest
-```
-
-数据保存在命名卷 `prompts-web-data`。浏览器打开 <http://127.0.0.1:8080> 登录。HTTPS、反向代理和 Apple container 的运行方式见 [`docs/deploy.md`](docs/deploy.md)。
+数据保存在 `DATA_DIR`（默认 `./data`）下的 `prompts.db`。环境变量在启动时读取，修改后重启进程生效。
+监听地址、HTTPS、反向代理、备份恢复见 [`docs/deploy.md`](docs/deploy.md)。
 
 ## 使用
 
@@ -65,14 +77,15 @@ docker run -d --name prompts-web -p 8080:8080 \
 5. 在右侧修改结果，对照差异和变量提醒，填写标题与标签后点「另存」。
 6. 响应在网络中丢失时，点「查询上次请求」取回这次运行的结果，不会重复调用模型。
 
-优化功能需要三个变量：`LLM_BASE_URL`（OpenAI 兼容地址，实际请求 `{LLM_BASE_URL}/chat/completions`）、`LLM_API_KEY` 和 `LLM_MODEL`。
-三个都设置后启动：
+优化功能需要三个变量：`LLM_BASE_URL`、`LLM_API_KEY` 和 `LLM_MODEL`。
+`LLM_BASE_URL` 是 Go 后端访问的 OpenAI 兼容 API 根地址，后端实际请求 `{LLM_BASE_URL}/chat/completions`。地址可以是公网域名，也可以是局域网地址，只要运行后端的机器能连上它。
 
 ```bash
 LLM_BASE_URL='https://api.example.com/v1' LLM_API_KEY='你的密钥' LLM_MODEL='模型名' \
-APP_PASSWORD='换成你的密码' APP_ORIGIN='http://127.0.0.1:8080' ./bin/server
+APP_PASSWORD='换成你的密码' APP_ORIGIN=http://127.0.0.1:8080 ./prompts-web
 ```
 
+容器用 `-e` 传入同样的三个变量。
 缺任意一个时，登录、Prompt 库和方案管理照常使用，新的优化请求返回 503。
 
 想先看到有内容的界面，用 [`docs/evaluation.md`](docs/evaluation.md) 里的命令导入 6 条演示 Prompt 和 3 个演示方案。
@@ -88,7 +101,8 @@ APP_PASSWORD='换成你的密码' APP_ORIGIN='http://127.0.0.1:8080' ./bin/serve
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/deploy.md`](docs/deploy.md) | 环境变量、Apple container、Compose + HTTPS、可信反向代理、备份恢复与升级 |
+| [`docs/deploy.md`](docs/deploy.md) | 环境变量、二进制与镜像运行、Compose + HTTPS、可信反向代理、备份恢复与升级 |
+| [`docs/apple-container.md`](docs/apple-container.md) | 用 Apple container 构建、运行和备份的示例 |
 | [`docs/development.md`](docs/development.md) | 目录结构、构建检查、前后端分离调试、测试 |
 | [`docs/evaluation.md`](docs/evaluation.md) | 导入演示数据，运行 JSONL 评测 |
 | [`docs/api.md`](docs/api.md) | HTTP 接口：请求、响应、错误码、字段长度 |

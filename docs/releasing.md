@@ -44,12 +44,14 @@ goreleaser release --snapshot --clean --skip=docker
 ```
 
 镜像由 `Dockerfile.release` 构建，构建上下文是 GoReleaser 生成的临时目录：`Dockerfile.release` 加上 `linux/amd64/prompts-web`、`linux/arm64/prompts-web` 两个预编译二进制，不含源码。
-用 Apple container 验证 arm64 镜像：把归档里的 `prompts-web` 放到 `ctx/linux/arm64/`，与 `Dockerfile.release` 同放在 `ctx/`，然后构建。`ctx/` 放在用户目录下，Apple container 1.0 传输 `/tmp` 里的上下文时得到空内容：
+本地验证 arm64 镜像：把归档里的 `prompts-web` 放到 `ctx/linux/arm64/`，与 `Dockerfile.release` 同放在 `ctx/`，用任一 OCI 客户端构建。`ctx/` 放在用户目录下（Apple container 1.0 传输 `/tmp` 里的上下文时得到空内容）：
 
 ```bash
-container build --platform linux/arm64 --build-arg TARGETPLATFORM=linux/arm64 \
-  -f ctx/Dockerfile.release -t prompts-web-release-check:arm64 ctx
+docker buildx build --platform linux/arm64 --build-arg TARGETPLATFORM=linux/arm64 \
+  -f ctx/Dockerfile.release -t prompts-web-release-check:arm64 --load ctx
 ```
+
+Apple container 把 `docker buildx build` 换成 `container build`，去掉 `--load`。
 
 ## 发布版本
 
@@ -71,6 +73,6 @@ git push origin v1.2.3
 
 ## 发布范围
 
-- 发布内容是二进制归档和 GHCR 镜像。从源码自行构建镜像用根目录的 `Dockerfile`，步骤见 [`deploy.md`](deploy.md)。
+- 发布内容是二进制归档和 GHCR 镜像。从源码自行构建镜像用根目录的 `Dockerfile`，Compose 方案（[`deploy.md`](deploy.md)）和 [`apple-container.md`](apple-container.md) 都用它。
 - 二进制没有编译期版本变量，`ldflags` 只做 `-s -w` 去符号。版本号来自归档文件名，构建信息用 `go version -m prompts-web` 查看。
 - 归档文件清单写在 `.goreleaser.yaml` 的 `archives.files` 里。真实 `.env`、数据目录和源码不在其中。
