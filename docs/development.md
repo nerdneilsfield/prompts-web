@@ -32,14 +32,14 @@ go vet ./...
 
 ## 前后端分离调试
 
-Vite 开发服务器把 `/api` 代理到 Go 服务，并把请求的 `Origin` 改写为后端地址，所以不需要修改 `APP_ORIGIN`。
+Vite 开发服务器把 `/api` 代理到 Go 服务，并把请求的 `Origin` 改写为 `BACKEND_ORIGIN`（默认 `http://localhost:8080`）。`BACKEND_ORIGIN` 与后端的 `APP_ORIGIN` 填同一个地址，写请求才能通过来源校验。
 
 ```bash
 APP_PASSWORD=dev APP_ORIGIN=http://127.0.0.1:8080 DATA_DIR=./data go run ./cmd/server   # 终端 1
-bun run dev                                                                              # 终端 2，页面在 http://localhost:5173
+BACKEND_ORIGIN=http://127.0.0.1:8080 bun run dev                                          # 终端 2，页面在 http://localhost:5173
 ```
 
-后端在其他地址时，设置 `BACKEND_ORIGIN`，例如 `BACKEND_ORIGIN=http://127.0.0.1:9090 bun run dev`。
+后端在其他地址时，两端同时改，例如 `APP_ORIGIN` 与 `BACKEND_ORIGIN` 都设为 `http://127.0.0.1:9090`。
 
 ## 测试
 
