@@ -302,6 +302,73 @@ curl -sS http://127.0.0.1:19080/api/session     # 用原密码登录后能看到
 上面只操作你自己新建的专用卷，不要对正在使用的卷做解包。也确实存在 `tar: ./lost+found: Permission denied`
 这个告警（不加 `--uid 0` 时），它只影响该空目录，不影响 `prompts.db`，但退出码会非 0，所以按上面的写法来。
 
+用 **Compose 部署**时，数据卷不是宿主上的普通目录，也不是你随手写的名字：`compose.yaml` 声明的是
+`app-data`，实际卷名带项目名前缀（本项目目录名即项目名，所以默认是 `prompts-web_app-data`）。
+Name 会被 `COMPOSE_PROJECT_NAME` 或 `-p` 改变，因此不要凭记忆拼，先用 Compose 自己报出来：
+
+```bash
+docker compose config --format json | python3 -c 'import sys,json;print(json.load(sys.stdin)["volumes"]["app-data"]["name"])'
+# 或从正在跑的容器读（更直接，顺带确认挂载点）
+docker inspect -f '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' "$(docker compose ps -aq app)"
+```
+
+备份（先停 app；`--no-deps` 避免顺带起 Caddy，`--entrypoint sh` 覆盖掉镜像的 Go ENTRYPOINT，
+`--user 0:0` 只是为了 `tar` 读得到卷里全部文件，不修改任何属主）：
+
+```bash
+cd /path/to/prompts-web
+docker compose stop app
+mkdir -p "$PWD/backups"
+docker compose run --rm --no-deps --user 0:0 \
+  -v "$PWD/backups:/backup" --entrypoint sh app \
+  -c 'tar czf /backup/prompts-web-backup.tar.gz -C /data .'
+ls -l backups/prompts-web-backup.tar.gz
+```
+
+其中 `-v "$PWD/backups:/backup"` 不能省：service 定义里只挂了 `/data`，没有宿主目录，
+一次性容器里默认看不到你的 `backups/`，而没有 `/backup` 就没有地方写 tar。
+反过来，**不需要**再写 `-v prompts-web_app-data:/data`：service 已声明 `/data` 挂载，
+一次性容器用的就是同一个卷，重复写反而容易写错卷名。
+
+恢复到**另一个专用卷**，不让恢复过程碰到正在用的那个卷：
+
+```bash
+docker volume create prompts-web_app-data-restored
+# Apple container 上实测必需：新卷是 root 属主。Docker 通常会用镜像目录初始化空命名卷，可能不需要，保留无害。
+docker run --rm -v prompts-web_app-data-restored:/data --entrypoint sh prompts-web:local \
+  -c 'chown 10001:10001 /data'
+docker run --rm -v prompts-web_app-data-restored:/data -v "$PWD/backups:/backup" \
+  --entrypoint sh prompts-web:local -c 'tar xzf /backup/prompts-web-backup.tar.gz -C /data'
+```
+
+切换 Compose 使用恢复出来的卷：不用改 `compose.yaml`，加一个最小 override 把 `app-data` 指向真实卷名即可
+（service 定义完全不动）：
+
+```yaml
+# compose.restore.yaml —— 只在恢复时使用
+volumes:
+  app-data:
+    name: prompts-web_app-data-restored
+```
+
+```bash
+docker compose -f compose.yaml -f compose.restore.yaml up -d app
+docker compose logs --tail 20 app       # 确认监听正常，再用原密码登录验证数据
+```
+
+override 的合并规则值得记一句，因为它决定了为什么上面改的是卷名而不是 mount 列表：Compose 按**容器内挂载点**合并
+volume 条目，所以 `app-data-restored:/data` 会替换原来那条 `/data`（不是叠加），而改成 `:/data2` 才会变成两个挂载。
+两者都实测过：同 target 得到 1 个 `/data` 挂载，异 target 得到 `/data` + `/data2` 两个。
+换句话说挂 mount 列表也能用，只是要确保 target 写成 `/data`；改卷名更短且不依赖这个细节。
+切换后 `docker compose config` 确认 `/data` 只有一个挂载，且 `volumes.app-data.name` 指向恢复出来的卷。
+确认无误后可删掉 override 文件；原卷 `prompts-web_app-data` 不会被这个流程删除。
+
+**本机（macOS，无 Docker daemon）没有实际跑过上面这些 Compose 命令**，只做了 `docker compose config`
+的静态解析。静态解析确认的事实：卷名确实解析为 `prompts-web_app-data`（前缀跟随项目名）；上面的恢复 override
+解析后只剩一个 `/data` 挂载且指向 `prompts-web_app-data-restored`；同名挂载点会替换、换挂载点才会追加。
+未验证的部分：`docker compose run` 的一次性容器是否真的能读写该卷、`docker run … chown` 在 Docker 上是否必要
+（Apple container 上实测必要，Docker 通常会用镜像目录初始化空命名卷）。
+
 **恢复会覆盖目标位置**：解包前确认那个卷/目录里没有你还需要的 `prompts.db`，这个操作不可撤销。备份包含你的全部
 Prompt 和方案，按敏感数据处理。
 
