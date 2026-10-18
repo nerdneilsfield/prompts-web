@@ -81,7 +81,9 @@ docker run -d --name prompts-web -p 8080:8080 \
 用宿主目录保存数据时，目录属主设为 10001：
 
 ```bash
-sudo mkdir -p /srv/prompts-web && sudo chown 10001:10001 /srv/prompts-web
+sudo mkdir -p /srv/prompts-web
+sudo chown 10001:10001 /srv/prompts-web
+sudo chmod 0700 /srv/prompts-web
 docker run -d --name prompts-web -p 8080:8080 \
   -e APP_PASSWORD='换成你的密码' -e APP_ORIGIN=http://127.0.0.1:8080 \
   -v /srv/prompts-web:/data ghcr.io/nerdneilsfield/prompts-web:latest
@@ -134,6 +136,7 @@ docker start prompts-web
 sudo mkdir -p /srv/prompts-web-restored
 sudo tar xzf prompts-web-backup-2026-10-18.tar.gz -C /srv/prompts-web-restored
 sudo chown -R 10001:10001 /srv/prompts-web-restored
+sudo chmod 0700 /srv/prompts-web-restored
 docker stop prompts-web && docker rm prompts-web
 docker run -d --name prompts-web -p 8080:8080 \
   -e APP_PASSWORD='换成你的密码' -e APP_ORIGIN=http://127.0.0.1:8080 \
