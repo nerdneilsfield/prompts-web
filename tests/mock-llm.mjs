@@ -3,6 +3,7 @@
 import http from "node:http";
 
 let fail = false;
+let calls = 0;
 const server = http.createServer((req, res) => {
   const chunks = [];
   req.on("data", (c) => chunks.push(c));
@@ -12,11 +13,16 @@ const server = http.createServer((req, res) => {
       res.end("ok");
       return;
     }
+    if (req.url === "/__calls") {
+      res.end(String(calls));
+      return;
+    }
     if (req.url !== "/v1/chat/completions") {
       res.statusCode = 404;
       res.end();
       return;
     }
+    calls++;
     const body = JSON.parse(Buffer.concat(chunks).toString());
     const user = body.messages.at(-1).content;
     const original = user.split("--- 原文 ---\n")[1] ?? "";

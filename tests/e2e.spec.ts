@@ -329,7 +329,13 @@ test("离开工作台即取消进行中的优化，迟到成功/失败都不污�
   await nav(page, "优化工作台").click();
   await expect(page.getByLabel(/优化结果（可编辑）/)).toHaveCount(0);
   await expect(page.getByLabel("原文")).toHaveValue("SLOW 切页成功");
-  await expect(page.getByRole("button", { name: "开始优化" })).toBeEnabled();
+  // 被中止的请求可能已在服务端运行：不自动显示、不放开主按钮（否则新 ID 会重复计费），只能手动查询
+  await expect(page.getByRole("button", { name: "开始优化" })).toBeDisabled();
+  await page.getByRole("button", { name: "查询上次请求" }).click();
+  // 服务端把被中止的请求记为已取消：明确失败终态，才释放 ID 允许重试
+  await expect(page.getByRole("alert").filter({ hasText: "已被取消" })).toBeVisible();
+  await expect(page.getByLabel(/优化结果（可编辑）/)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "重试优化" })).toBeEnabled();
 
   // 慢失败
   await request.post("http://127.0.0.1:18081/__mode", { data: { fail: true } });
@@ -341,8 +347,11 @@ test("离开工作台即取消进行中的优化，迟到成功/失败都不污�
     await page.waitForTimeout(3500);
     await nav(page, "优化工作台").click();
     await expect(page.getByRole("alert").filter({ hasText: "模型服务出错" })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "开始优化" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "开始优化" })).toBeDisabled();
     await expect(page.getByLabel("原文")).toHaveValue("SLOW 切页失败");
+    await page.getByRole("button", { name: "查询上次请求" }).click(); // 明确失败后才释放
+    await expect(page.getByRole("alert").filter({ hasText: "已被取消" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "重试优化" })).toBeEnabled();
   } finally {
     await request.post("http://127.0.0.1:18081/__mode", { data: { fail: false } });
   }
@@ -465,4 +474,68 @@ test("320px：48 字符标签在编辑表单里 × 可见、可点、能清空�
   await page.reload();
   await cards(page).filter({ hasText: "长标签条目" }).click();
   await expect(page.getByLabel("Prompt 详情").getByText("无标签")).toBeVisible();
+});
+
+const callCount = async (request: import("@playwright/test").APIRequestContext) =>
+  Number(await (await request.get("http://127.0.0.1:18081/__calls")).text());
+
+test("丢响应后仍 running：保留同一请求 ID，手动查询找回结果，模型只调用一次", async ({ page, request }) => {
+  await login(page);
+  await nav(page, "优化工作台").click();
+  if (await page.getByLabel("优化方案").isDisabled()) await addScheme(page, "恢复方案", "保持原意");
+
+  // 第一次 POST：服务端照常收到并在途（模拟模型 3 秒后成功），但浏览器拿不到响应。
+  let posts = 0;
+  await page.route("**/api/optimizations", async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    posts++;
+    void route.fetch().catch(() => {});
+    await route.abort("connectionreset");
+  });
+  const before = await callCount(request);
+  await page.getByLabel("原文").fill("SLOW 丢响应恢复");
+  await page.getByRole("button", { name: "开始优化" }).click();
+
+  // 自动补查一次仍 running：不能变成「重试」，必须保留并提供手动查询
+  await expect(page.getByRole("alert").filter({ hasText: "服务端仍在处理" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "重试优化" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "开始优化" })).toBeDisabled();
+  expect(posts).toBe(1);
+
+  // 上游还没返回时手动查询：仍 running，继续保留
+  await page.getByRole("button", { name: "查询上次请求" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "服务端仍在处理" })).toBeVisible();
+  await expect(page.getByLabel(/优化结果（可编辑）/)).toHaveCount(0);
+
+  await expect.poll(() => callCount(request), { timeout: 8000 }).toBe(before + 1);
+  await page.waitForTimeout(3500); // 等上游返回并落库
+  await page.getByRole("button", { name: "查询上次请求" }).click();
+  await expect(page.getByLabel(/优化结果（可编辑）/)).toHaveValue("优化后：SLOW 丢响应恢复");
+  expect(posts).toBe(1); // 没有再次 POST
+  expect(await callCount(request)).toBe(before + 1); // 模型只被调用一次
+  await expect(page.getByRole("button", { name: "查询上次请求" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "开始优化" })).toBeEnabled();
+});
+
+test("退出登录失败（503）保持已登录并可重试，成功后刷新仍未登录", async ({ page }) => {
+  await login(page);
+  await page.route("**/api/session", async (route) => {
+    if (route.request().method() === "DELETE")
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: { code: "internal", message: "x" } }) });
+    else await route.continue();
+  });
+  await page.getByRole("button", { name: "退出登录" }).click();
+  await expect(page.getByText("退出登录失败，当前仍保持登录")).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "主导航" })).toBeVisible();
+  await expect(page.getByLabel("站点密码")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "退出登录" })).toBeEnabled();
+  await page.reload();
+  await expect(page.getByRole("navigation", { name: "主导航" })).toBeVisible(); // 服务端会话确实还在
+
+  await page.unroute("**/api/session");
+  await page.getByRole("button", { name: "退出登录" }).click();
+  await expect(page.getByLabel("站点密码")).toBeVisible();
+  await page.reload();
+  await expect(page.getByLabel("站点密码")).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "主导航" })).toHaveCount(0);
 });

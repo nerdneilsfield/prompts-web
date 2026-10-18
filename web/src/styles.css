@@ -103,6 +103,8 @@ code { font-family: var(--font-mono); font-size: var(--text-sm); background: var
 .side button { text-align: left; border-color: transparent; background: none; color: var(--color-ink-2); padding: 0 var(--space-xs); }
 .side button[aria-current="true"] { background: var(--color-accent-soft); color: var(--color-accent); font-weight: 600; }
 .side .logout { margin-top: auto; color: var(--color-muted); }
+.side .error:empty { display: none; }
+.side .error { flex-basis: 100%; }
 main { padding: var(--space-lg); min-width: 0; max-width: 84rem; }
 
 /* ---- surfaces ---- */

@@ -116,6 +116,15 @@ export function Workbench({ modelConfigured, active, authGen, incoming, onSaved 
   const [run, setRun] = useState<Run | null>(null);
   const [edited, setEdited] = useState("");
   const [notice, setNotice] = useState("");
+  // A POST whose outcome we do not know yet. Its ID stays until a terminal run or a 404 proves the
+  // server has nothing, so a retry can never mint a second ID for work that may already be billed.
+  const [pending, setPending] = useState<string | null>(null);
+  const [looking, setLooking] = useState(false);
+  const pendingRef = useRef<string | null>(null);
+  const setPend = (id: string | null) => {
+    pendingRef.current = id;
+    setPending(id);
+  };
 
   // Every input/scheme change bumps `epoch`; a response is applied only if the epoch it was
   // sent under is still current. `inflight` is the synchronous double-click lock.
@@ -129,7 +138,13 @@ export function Workbench({ modelConfigured, active, authGen, incoming, onSaved 
     abort.current = null;
     inflight.current = false;
     setLoading(false);
+    setLooking(false);
     setError("");
+  };
+  // The input or scheme changed (or was replaced): the pending request no longer describes this work.
+  const reset = () => {
+    invalidate();
+    setPend(null);
   };
 
   const loadSchemes = async (removedOrEdited?: number) => {
@@ -138,7 +153,7 @@ export function Workbench({ modelConfigured, active, authGen, incoming, onSaved 
       setSchemes(list);
       setLoadErr("");
       setSchemeId((cur) => (cur !== null && list.some((s) => s.id === cur) ? cur : (list[0]?.id ?? null)));
-      if (removedOrEdited !== undefined) invalidate();
+      if (removedOrEdited !== undefined) reset();
     } catch (e) {
       setLoadErr(describeError(e));
     }
@@ -157,7 +172,7 @@ export function Workbench({ modelConfigured, active, authGen, incoming, onSaved 
   useEffect(() => {
     if (!incoming) return;
     if (input.trim() && input !== incoming.text && !window.confirm("工作台里已有未处理的原文，确定用所选 Prompt 替换吗？")) return;
-    invalidate();
+    reset();
     setInput(incoming.text);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [incoming]);
@@ -168,13 +183,37 @@ export function Workbench({ modelConfigured, active, authGen, incoming, onSaved 
     setError(r.status === "succeeded" ? "" : (runErrorText[r.error_kind ?? ""] ?? "优化失败，请重试。"));
   };
 
+  // One GET by ID, never polled. Terminal -> show it and release the ID; 404 -> the server has
+  // nothing, release; running or unreachable -> keep the ID and say so.
+  const lookupOnce = async (id: string, current: () => boolean, signal: AbortSignal) => {
+    try {
+      const r = await api<Run>("GET", `/api/optimizations/${id}`, undefined, signal);
+      if (!current()) return;
+      if (r.status === "running") {
+        setError("服务端仍在处理这次请求。点「查询上次请求」再看一次；不会重复提交，也不会产生第二次调用。");
+      } else {
+        setPend(null);
+        applyRun(r);
+      }
+    } catch (e) {
+      if (!current() || signal.aborted) return;
+      if (e instanceof ApiError && e.status === 404) {
+        setPend(null);
+        setError("服务端没有这次请求的记录，可以重新开始优化。输入已保留。");
+      } else {
+        setError("暂时无法确认上次请求的状态。已保留该请求，可再次点「查询上次请求」；输入已保留。");
+      }
+    }
+  };
+
   const optimize = async () => {
-    if (inflight.current || schemeId === null || !input.trim()) return;
+    if (inflight.current || pendingRef.current || schemeId === null || !input.trim()) return;
     inflight.current = true;
     const myEpoch = epoch.current;
     const ac = new AbortController();
     abort.current = ac;
     const requestId = newRequestId();
+    setPend(requestId);
     setLoading(true);
     setError("");
     setNotice("");
@@ -187,29 +226,23 @@ export function Workbench({ modelConfigured, active, authGen, incoming, onSaved 
         ac.signal,
       );
       if (!current()) return;
-      if (status === 202 || data.status === "running") {
-        // Another request with this ID is running; look once, never poll.
-        const again = await api<Run>("GET", `/api/optimizations/${requestId}`, undefined, ac.signal);
-        if (!current()) return;
-        if (again.status === "running") setError("服务端仍在处理这次请求，请稍后手动再试。输入已保留。");
-        else applyRun(again);
-      } else applyRun(data);
+      if (status === 202 || data.status === "running") await lookupOnce(requestId, current, ac.signal);
+      else {
+        setPend(null);
+        applyRun(data);
+      }
     } catch (e) {
       if (!current() || ac.signal.aborted) return;
-      if (e instanceof ApiError) {
-        setError(
-          e.code === "model_not_configured" ? "服务端未配置模型，无法优化。" : describeError(e),
-        );
+      if (e instanceof ApiError && e.status < 500) {
+        // The server rejected it before running anything: nothing to recover.
+        setPend(null);
+        setError(e.code === "model_not_configured" ? "服务端未配置模型，无法优化。" : describeError(e));
+      } else if (e instanceof ApiError) {
+        // 5xx: the run may exist (e.g. its final state could not be stored). Keep the ID.
+        setError(`${describeError(e)}这次请求可能已在服务端运行，可点「查询上次请求」确认，输入已保留。`);
       } else {
-        // Response may have been lost after the server ran it: one lookup by ID.
-        try {
-          const found = await api<Run>("GET", `/api/optimizations/${requestId}`, undefined, ac.signal);
-          if (!current()) return;
-          if (found.status === "running") setError("连接中断，服务端仍在处理。输入已保留，请稍后手动再试。");
-          else applyRun(found);
-        } catch {
-          if (current()) setError("无法连接服务器，输入已保留，请检查网络后重试。");
-        }
+        // The response may have been lost after the server ran it: look once, keep the ID.
+        await lookupOnce(requestId, current, ac.signal);
       }
     } finally {
       if (current()) {
@@ -220,8 +253,29 @@ export function Workbench({ modelConfigured, active, authGen, incoming, onSaved 
     }
   };
 
+  const lookupPending = async () => {
+    const id = pendingRef.current;
+    if (!id || inflight.current) return;
+    inflight.current = true;
+    const myEpoch = epoch.current;
+    const ac = new AbortController();
+    abort.current = ac;
+    const current = () => epoch.current === myEpoch;
+    setLooking(true);
+    setError("");
+    try {
+      await lookupOnce(id, current, ac.signal);
+    } finally {
+      if (current()) {
+        inflight.current = false;
+        abort.current = null;
+        setLooking(false);
+      }
+    }
+  };
+
   const delta = run ? placeholderDelta(run.input, edited) : null;
-  const canRun = modelConfigured && schemeId !== null && input.trim() !== "" && !loading;
+  const canRun = modelConfigured && schemeId !== null && input.trim() !== "" && !loading && !looking && !pending;
 
   return (
     <div className="workbench">
@@ -239,7 +293,7 @@ export function Workbench({ modelConfigured, active, authGen, incoming, onSaved 
             rows={6}
             value={input}
             onChange={(e) => {
-              invalidate();
+              reset();
               setInput(e.target.value);
             }}
             placeholder="粘贴要优化的 prompt，或在 Prompt 库中点「载入优化」"
@@ -254,7 +308,7 @@ export function Workbench({ modelConfigured, active, authGen, incoming, onSaved 
               value={schemeId ?? ""}
               disabled={!schemes?.length}
               onChange={(e) => {
-                invalidate();
+                reset();
                 setSchemeId(Number(e.target.value));
               }}
             >
@@ -268,12 +322,18 @@ export function Workbench({ modelConfigured, active, authGen, incoming, onSaved 
             </select>
           </div>
           <button type="button" className="primary" onClick={optimize} disabled={!canRun} aria-busy={loading}>
-            {loading ? "优化中…（最长约 90 秒）" : error ? "重试优化" : "开始优化"}
+            {loading ? "优化中…（最长约 90 秒）" : error && !pending ? "重试优化" : "开始优化"}
           </button>
+          {pending && (
+            <button type="button" onClick={lookupPending} disabled={loading || looking} aria-busy={looking}>
+              {looking ? "查询中…" : "查询上次请求"}
+            </button>
+          )}
         </div>
         <p className="error" role="alert">
           {error || loadErr}
         </p>
+        {pending && !loading && <p className="muted small">上次请求结果未确认。修改原文或方案会放弃它。</p>}
         {notice && <p role="status">{notice}</p>}
       </div>
 

@@ -52,6 +52,8 @@ export function App() {
   const [incoming, setIncoming] = useState<{ text: string; n: number } | null>(null);
   const [version, setVersion] = useState(0);
   const [authGen, setAuthGen] = useState(0);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [logoutErr, setLogoutErr] = useState("");
   const [focusId, setFocusId] = useState<number | null>(null);
   const n = useRef(0);
 
@@ -64,15 +66,25 @@ export function App() {
 
   const authed = session?.authenticated ?? false;
   useEffect(() => {
-    if (authed) setEverIn(true);
+    if (authed) {
+      setEverIn(true);
+      setLogoutErr("");
+    }
   }, [authed]);
 
+  // Only a confirmed DELETE leaves the app; on failure the session is still valid server-side.
   const logout = async () => {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    setLogoutErr("");
     try {
       await api("DELETE", "/api/session");
-    } finally {
       setEverIn(false);
       setSession((s) => (s ? { ...s, authenticated: false } : s));
+    } catch {
+      setLogoutErr("退出登录失败，当前仍保持登录。请重试。");
+    } finally {
+      setLoggingOut(false);
     }
   };
 
@@ -105,9 +117,12 @@ export function App() {
             <button type="button" aria-current={tab === "workbench"} onClick={() => setTab("workbench")}>
               优化工作台
             </button>
-            <button type="button" className="logout" onClick={logout}>
-              退出登录
+            <button type="button" className="logout" onClick={logout} disabled={loggingOut} aria-busy={loggingOut}>
+              {loggingOut ? "退出中…" : "退出登录"}
             </button>
+            <p className="error" role="alert">
+              {logoutErr}
+            </p>
           </nav>
           {/* Both pages stay mounted so unsaved forms and in-flight work survive tab switches. */}
           <main>
