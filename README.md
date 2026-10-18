@@ -23,10 +23,16 @@ bun run build                     # 生成 web/dist；Go 用 go:embed 内嵌它
 go build -o bin/server ./cmd/server
 
 export APP_PASSWORD='你的站点密码'
+export APP_ORIGIN='http://127.0.0.1:8080'   # 必须与你在浏览器里输入的地址完全一致
 ./bin/server                      # 默认 127.0.0.1:8080
 ```
 
-打开 <http://127.0.0.1:8080>，用 `APP_PASSWORD` 登录。没有配置模型时站点照常可用：登录、库、方案、
+打开 <http://127.0.0.1:8080>，用 `APP_PASSWORD` 登录。
+
+`APP_ORIGIN` 必须写成你实际访问的地址：写请求的同源校验要求浏览器发出的 `Origin` 与其逐字节相等，
+不一致就直接 `403 bad_origin`（默认值是 `http://localhost:8080`，所以你用 `127.0.0.1:8080` 打开却只设密码时，
+登录会被拒）。两者选一个保持一致即可：访问 `127.0.0.1:8080` 就设 `APP_ORIGIN=http://127.0.0.1:8080`，
+访问 `localhost:8080` 就保持默认值。没有配置模型时站点照常可用：登录、库、方案、
 已运行记录的查询都正常，只有新的优化请求返回 `503 model_not_configured`。
 
 `go build` 之前必须先 `bun run build`：`web/dist` 不存在时 `go:embed` 会直接编译失败，而不是留下一个空页面。
@@ -245,17 +251,59 @@ EVAL_BASE_URL=http://127.0.0.1:19100/v1 EVAL_API_KEY=mock EVAL_MODEL=mock-model 
 
 ## 备份、恢复与升级
 
-要备份的东西只有一个：`DATA_DIR` 整个目录（里面就是 `prompts.db`）。会话在内存里，没有别的状态。
+要备份的东西只有一个：`DATA_DIR` 整个目录（里面就是 `prompts.db`）。会话在内存里，没有别的状态。**必须先停服务**，
+运行中直接拷贝可能拿到写了一半的数据库文件。
+
+用 bind mount 时，数据本来就是宿主上的普通目录，用宿主命令复制即可：
 
 ```bash
-container stop prompts-web-test        # 先停服务；compose 部署用 docker compose stop app
-cp -a /tmp/prompts-web-data /tmp/prompts-web-backup-$(date +%F)   # 复制整个目录
+# 假设启动时用的是 -v /tmp/prompts-web-data:/data
+container stop prompts-web-test          # compose 部署：docker compose stop app
+tar czf /tmp/prompts-web-backup-$(date +%F).tar.gz -C /tmp/prompts-web-data .
+mkdir -p /tmp/prompts-web-data-restored
+tar xzf /tmp/prompts-web-backup-$(date +%F).tar.gz -C /tmp/prompts-web-data-restored
+# 恢复：改用 -v /tmp/prompts-web-data-restored:/data 启动，或把解出的内容放回原目录后再启动
 container start prompts-web-test
 ```
 
-**必须在停止服务之后再复制**，运行中直接拷贝可能得到写了一半的数据库文件。备份里含有你的全部
-Prompt 和方案，按敏感数据处理。恢复就是把备份目录放回 `DATA_DIR` 位置再启动；覆盖前先确认目标目录
-里没有你还需要的 `prompts.db`，这个操作不可撤销。
+用**命名卷**时宿主上看不到普通文件，要靠容器只读导出。下面这套命令在 Apple container 1.0 上完整验证过：
+备份、恢复到**另一个专用卷**、启动后数据（含 Prompt 条目）都在。
+
+```bash
+container stop prompts-web-test
+
+# 1) 备份：只读挂载数据卷，导出 tar 到宿主目录（--entrypoint sh 不能省）
+mkdir -p /tmp/prompts-web-backups
+container run --rm --uid 0 \
+  -v prompts-web-data:/data:ro \
+  -v /tmp/prompts-web-backups:/backup \
+  --entrypoint sh prompts-web:local \
+  -c 'tar czf /backup/prompts-web-backup.tar.gz -C /data .'
+
+# 2) 恢复：新建一个专用卷，先给它一次属主，再解包进去
+container volume create prompts-web-data-restored
+container run --rm --uid 0 -v prompts-web-data-restored:/data \
+  --entrypoint sh prompts-web:local -c 'chown 10001:10001 /data'
+container run --rm --uid 0 \
+  -v prompts-web-data-restored:/data \
+  -v /tmp/prompts-web-backups:/backup \
+  --entrypoint sh prompts-web:local \
+  -c 'tar xzf /backup/prompts-web-backup.tar.gz -C /data'
+
+# 3) 用恢复出来的卷启动并确认
+container run -d --name prompts-web-restored -p 19080:8080 \
+  -e APP_PASSWORD='local-test-password' -e APP_ORIGIN=http://127.0.0.1:19080 \
+  -v prompts-web-data-restored:/data prompts-web:local
+curl -sS http://127.0.0.1:19080/api/session     # 用原密码登录后能看到原有 Prompt
+```
+
+几点说明：导出用 `--uid 0` 只是为了让 `tar` 能读卷里的全部文件并避开 `lost+found` 的权限告警，
+它**不会修改卷里任何数据的属主**；`--entrypoint sh` 必须写，否则镜像的 ENTRYPOINT 会把 `-c …` 当成服务参数。
+上面只操作你自己新建的专用卷，不要对正在使用的卷做解包。也确实存在 `tar: ./lost+found: Permission denied`
+这个告警（不加 `--uid 0` 时），它只影响该空目录，不影响 `prompts.db`，但退出码会非 0，所以按上面的写法来。
+
+**恢复会覆盖目标位置**：解包前确认那个卷/目录里没有你还需要的 `prompts.db`，这个操作不可撤销。备份包含你的全部
+Prompt 和方案，按敏感数据处理。
 
 升级：先按上面做备份，再换新镜像/新二进制，最后启动并 `curl /api/session` 确认能登录。Go 二进制之间
 没有版本回滚封装，**回退就是把旧二进制放回去**，并配套使用相应时间点的数据备份——代码与数据的兼容

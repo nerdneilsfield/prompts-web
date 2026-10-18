@@ -87,7 +87,7 @@ export function runChecks(text, checks) {
       add(`required_keys:${required.join(",")}`, missing.length === 0, missing.length === 0 ? "all present" : `missing ${missing.join(",")}`);
     }
   }
-  return { scored: true, passed: outcomes.every((o) => o.passed), outcomes };
+  return { scored: outcomes.length > 0, passed: outcomes.length > 0 ? outcomes.every((o) => o.passed) : null, outcomes };
 }
 
 function configFromEnv() {
@@ -363,25 +363,21 @@ function summarize(records, samples, runs, meta) {
 }
 
 // Offline: reads what the run already wrote and counts a human's A/B/tie votes.
-// No model is called here.
+// No model is called here, and nothing outside outDir is read: the sample ids and
+// run counts come from responses.jsonl, so later edits to the sample file (or its
+// deletion) cannot change a summary of a run that has already happened.
 async function summarizeOnly(outDir, annotationsPath) {
   const sampleRecords = (await readFile(`${outDir}/responses.jsonl`, "utf8"))
     .split("\n")
     .filter((l) => l.trim() !== "")
     .map((l) => JSON.parse(l));
+  if (sampleRecords.length === 0) throw new Error(`${outDir}/responses.jsonl has no records`);
   const mapping = JSON.parse(await readFile(`${outDir}/blind-map.json`, "utf8"));
   const annotations = annotationsPath ? JSON.parse(await readFile(annotationsPath, "utf8")) : { items: {} };
   const votes = annotations.items ?? {};
 
-  // Rebuild the sample list from the responses: id + checks come from the sample file.
-  const samplesPath = process.env.EVAL_SAMPLES ?? "fixtures/eval-samples.jsonl";
-  let samples;
-  try {
-    samples = await loadSamples(samplesPath);
-  } catch {
-    // Without the sample file we still know every sample id and can count checks.
-    samples = [...new Set(sampleRecords.map((r) => r.sample_id))].map((id) => ({ id }));
-  }
+  // Only ids are needed: per-run check outcomes are already stored in the records.
+  const samples = [...new Set(sampleRecords.map((r) => r.sample_id))].map((id) => ({ id }));
   const runs = Math.max(...sampleRecords.map((r) => r.run_index));
   const summary = summarize(sampleRecords, samples, runs, { endpoint: null, model: sampleRecords[0]?.model ?? null });
 
