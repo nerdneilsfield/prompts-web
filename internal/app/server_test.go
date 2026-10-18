@@ -998,6 +998,32 @@ func TestModelUnconfiguredDegradesGracefully(t *testing.T) {
 	}
 }
 
+func TestLoginResponseReportsModelConfigured(t *testing.T) {
+	for name, configured := range map[string]bool{"model configured": true, "model unconfigured": false} {
+		t.Run(name, func(t *testing.T) {
+			env := newTestEnv(t, func(c *Config) {
+				if !configured {
+					c.BaseURL, c.APIKey, c.Model = "", "", ""
+				}
+			})
+
+			resp, raw := env.request(t, http.MethodPost, "/api/session", `{"password":"`+testPassword+`"}`, nil)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("login status = %d, body %s", resp.StatusCode, raw)
+			}
+			session := decode[map[string]any](t, raw)
+			if session["authenticated"] != true {
+				t.Fatalf("authenticated = %v, want true", session["authenticated"])
+			}
+			// The login response carries the same derived flag as GET, so the frontend
+			// can decide whether to offer the optimize entry without a second call.
+			if session["model_configured"] != configured {
+				t.Fatalf("model_configured = %v, want %v (body %s)", session["model_configured"], configured, raw)
+			}
+		})
+	}
+}
+
 func TestModelConfiguredIsReported(t *testing.T) {
 	env := newTestEnv(t, nil)
 	resp, raw := env.request(t, http.MethodGet, "/api/session", "", nil)
@@ -1025,8 +1051,13 @@ func TestTerminalWriteFailureIsNotReportedAsSuccess(t *testing.T) {
 	scheme := createScheme(t, env, cookie, "方案", "正文")
 
 	entered := make(chan struct{}, 1)
+	written := make(chan struct{})
 	env.upstream.reply(func(w http.ResponseWriter, r *http.Request) {
 		entered <- struct{}{}
+		// Hold the response until query_only is confirmed on, so the terminal write
+		// is guaranteed to fail. Without this barrier the test leans on the goroutine
+		// winning a race it has no synchronization for.
+		<-written
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"choices":[{"message":{"content":"结果"}}]}`)
 	})
@@ -1036,6 +1067,7 @@ func TestTerminalWriteFailureIsNotReportedAsSuccess(t *testing.T) {
 		if _, err := env.store.db.Exec(`PRAGMA query_only=ON`); err != nil {
 			t.Errorf("enable query_only: %v", err)
 		}
+		close(written)
 	}()
 
 	resp, raw := env.request(t, http.MethodPost, "/api/optimizations",

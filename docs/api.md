@@ -102,7 +102,7 @@ Set-Cookie: session=<32 字节随机 hex>; Path=/; Max-Age=86400; HttpOnly; Same
 
 请求：`{"password":"..."}`
 
-- `200 {"authenticated": true}` + `Set-Cookie`。
+- `200 {"authenticated": true, "model_configured": true}` + `Set-Cookie`。成功登录的响应带与 `GET /api/session` 相同的派生 `model_configured`，前端登录后无需再查一次就能决定是否提供优化入口。
 - `401 {"error":{"code":"unauthorized",...}}` — 密码错误。
 - `429 {"error":{"code":"rate_limited",...}}` + `Retry-After`（秒）— 该 IP 的尝试额度已用尽，**此时正确密码同样被拒**，直到窗口滑过（成功登录会清零计数）。额度在读取请求体和比对密码之前原子预占，因此并发尝试不能超出上限；代价是超限时连格式非法的请求体也返回 429。
 - `400 bad_request` — 空请求体或非法 JSON。
@@ -266,7 +266,7 @@ Run 对象：
 3. 若当前请求是重发方向、不知道原请求结果（例如超时后发现 `202`），用 `GET /api/optimizations/{requestId}` **查一次**；若仍是 `running`，提示用户稍后手动刷新，不要定时轮询。
 4. `status != "running"` 即终态，此后无需再查。
 
-注意：`202` 只出现在同一 `request_id` 的并发场景；`input` 或 `scheme_id` 不同的重放是 `409`，不是 `202`。
+注意：`202` 由「已有记录仍为 `running`」决定，而不是“正在并发”本身。除并发同 ID 外，还有一种情况会得到 `202`：上次运行已实际调用上游但**终态写入失败**（返回了 `500 internal`），该 `running` 行留在库里，随后同 ID 重放就会命中这个分支。前端对二者的处理方式相同 —— 不重试、不轮询，用 `GET` 查一次。`input` 或 `scheme_id` 不同的重放仍是 `409`，不是 `202`。
 
 其他响应：
 

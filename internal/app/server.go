@@ -231,7 +231,7 @@ func (c *Client) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c.setSessionCookie(w, token, int(c.cfg.SessionTTL.Seconds()))
-	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": true})
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "model_configured": c.cfg.modelConfigured()})
 }
 
 func (c *Client) handleLogout(w http.ResponseWriter, r *http.Request) {
