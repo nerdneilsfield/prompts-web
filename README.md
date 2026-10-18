@@ -334,10 +334,11 @@ ls -l backups/prompts-web-backup.tar.gz
 
 ```bash
 docker volume create prompts-web_app-data-restored
-# Apple container 上实测必需：新卷是 root 属主。Docker 通常会用镜像目录初始化空命名卷，可能不需要，保留无害。
-docker run --rm -v prompts-web_app-data-restored:/data --entrypoint sh prompts-web:local \
+# 新卷是 root 属主，而镜像 USER 是 10001，所以两条命令都必须 --user 0:0：
+# 没有它，chown 自己就没权限，解包也无法还原 tar 里 10001:10001 的属主。
+docker run --rm --user 0:0 -v prompts-web_app-data-restored:/data --entrypoint sh prompts-web:local \
   -c 'chown 10001:10001 /data'
-docker run --rm -v prompts-web_app-data-restored:/data -v "$PWD/backups:/backup" \
+docker run --rm --user 0:0 -v prompts-web_app-data-restored:/data -v "$PWD/backups:/backup" \
   --entrypoint sh prompts-web:local -c 'tar xzf /backup/prompts-web-backup.tar.gz -C /data'
 ```
 
@@ -345,7 +346,7 @@ docker run --rm -v prompts-web_app-data-restored:/data -v "$PWD/backups:/backup"
 （service 定义完全不动）：
 
 ```yaml
-# compose.restore.yaml —— 只在恢复时使用
+# compose.restore.yaml —— 恢复后长期保留，不能删
 volumes:
   app-data:
     name: prompts-web_app-data-restored
@@ -356,18 +357,33 @@ docker compose -f compose.yaml -f compose.restore.yaml up -d app
 docker compose logs --tail 20 app       # 确认监听正常，再用原密码登录验证数据
 ```
 
+**这个 override 要一直带着**：卷名只存在于 override 里，不带它就回到主配置的 `app-data`，
+默认 `up` 会直接切回原卷（数据看起来“回退了”）。所以后续**所有**命令都要带同样的 `-f`，
+包括 `config`、`stop`、`ps`、以及升级时的 `up`：
+
+```bash
+docker compose -f compose.yaml -f compose.restore.yaml config
+docker compose -f compose.yaml -f compose.restore.yaml stop app
+docker compose -f compose.yaml -f compose.restore.yaml up -d --build
+```
+
+想不带 `-f`（或把它交给 systemd/其他运维脚本时），就把恢复卷名写进主配置：把 `compose.yaml` 末的
+`app-data:` 改成 `app-data: { name: prompts-web_app-data-restored }`，确认 `docker compose config` 后
+再删掉 override。两条路选一条，不要既删 override 又不改主配置。
+
 override 的合并规则值得记一句，因为它决定了为什么上面改的是卷名而不是 mount 列表：Compose 按**容器内挂载点**合并
 volume 条目，所以 `app-data-restored:/data` 会替换原来那条 `/data`（不是叠加），而改成 `:/data2` 才会变成两个挂载。
 两者都实测过：同 target 得到 1 个 `/data` 挂载，异 target 得到 `/data` + `/data2` 两个。
 换句话说挂 mount 列表也能用，只是要确保 target 写成 `/data`；改卷名更短且不依赖这个细节。
 切换后 `docker compose config` 确认 `/data` 只有一个挂载，且 `volumes.app-data.name` 指向恢复出来的卷。
-确认无误后可删掉 override 文件；原卷 `prompts-web_app-data` 不会被这个流程删除。
+原卷 `prompts-web_app-data` 不会被这个流程删除（不含 `down -v` 或 `volume rm`）。
 
 **本机（macOS，无 Docker daemon）没有实际跑过上面这些 Compose 命令**，只做了 `docker compose config`
 的静态解析。静态解析确认的事实：卷名确实解析为 `prompts-web_app-data`（前缀跟随项目名）；上面的恢复 override
 解析后只剩一个 `/data` 挂载且指向 `prompts-web_app-data-restored`；同名挂载点会替换、换挂载点才会追加。
-未验证的部分：`docker compose run` 的一次性容器是否真的能读写该卷、`docker run … chown` 在 Docker 上是否必要
-（Apple container 上实测必要，Docker 通常会用镜像目录初始化空命名卷）。
+未验证的部分：`docker compose run` 一次性容器与上面两条 `docker run` 的实际执行（本机无 daemon）。
+`--user 0:0` 的必要性与“Docker 会不会用镜像目录初始化新命名卷”无关：卷是 root 属主而镜像 USER 是 10001，
+这点已在 Apple container 上实测（不加则 chown 与解包都因权限失败），所以这里不依赖 Docker 的行为差异。
 
 **恢复会覆盖目标位置**：解包前确认那个卷/目录里没有你还需要的 `prompts.db`，这个操作不可撤销。备份包含你的全部
 Prompt 和方案，按敏感数据处理。
