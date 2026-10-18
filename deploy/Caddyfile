@@ -1,0 +1,31 @@
+# HTTPS reverse proxy for the optional Compose deployment.
+#
+# Replace the address with your real domain BEFORE starting: Caddy obtains a
+# Let's Encrypt certificate automatically, which requires that the domain
+# already resolves to this host and that ports 80 and 443 are reachable.
+# Caddy's automatic HTTPS already sets X-Forwarded-Proto; the Go server does not
+# read forwarded headers, so nothing else needs configuring here.
+
+{$APP_DOMAIN} {
+	log {
+		output stderr
+		format console
+	}
+
+	# 1 MiB request bodies are the app's own limit; this is the outer guard.
+	request_body {
+		max_size 2MB
+	}
+
+	# The optimization request is synchronous and takes up to 90s. Caddy's
+	# default has no read timeout, but keep the intent explicit for whoever
+	# edits this file: do not add a shorter proxy timeout here.
+	reverse_proxy app:8080 {
+		transport http {
+			read_timeout 120s
+			write_timeout 120s
+		}
+	}
+
+	encode zstd gzip
+}

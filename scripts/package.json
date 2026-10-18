@@ -1,0 +1,6 @@
+{
+  "name": "prompts-web-task3",
+  "private": true,
+  "type": "module",
+  "description": "Demo import and evaluation scripts for task 3. Not part of the web app build; scripts/ is excluded from the Docker build context."
+}

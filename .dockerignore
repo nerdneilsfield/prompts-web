@@ -1,0 +1,29 @@
+# Build context hygiene: the image is rebuilt from source and lockfiles.
+# Excluding a path here does not delete it on the host.
+#
+# Source that the image build actually needs:
+#   package.json, bun.lock, tsconfig.json, vite.config.ts, web/, go.mod, go.sum,
+#   cmd/, internal/, README.md
+.git
+.gitignore
+.cw
+.hallmark
+.hallmarkignore
+node_modules
+web/node_modules
+web/dist
+bin
+data
+test-results
+playwright-report
+coverage
+tests
+fixtures
+scripts
+eval-out
+.env
+.env.*
+!.env.example
+*.log
+design.md
+DESIGN.md

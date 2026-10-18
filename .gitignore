@@ -153,3 +153,5 @@ vite.config.ts.timestamp-*
 /bin/
 /test-results/
 /playwright-report/
+/eval-out/
+/scripts/node_modules/
