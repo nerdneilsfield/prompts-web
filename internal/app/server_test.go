@@ -272,6 +272,222 @@ func errorCode(t *testing.T, raw []byte) string {
 
 // ---- session, auth, origin ----
 
+// ---- reverse proxy client address ----
+
+// TestLoginThrottleIgnoresForwardedHeadersByDefault is the regression for the
+// reported bypass: behind Caddy every visitor shares the peer address, but with
+// trust off the headers are attacker-controlled and must not create a fresh
+// quota per forged value.
+func TestLoginThrottleIgnoresForwardedHeadersByDefault(t *testing.T) {
+	env := newTestEnv(t, func(c *Config) {
+		c.LoginMaxFailures = 2
+		c.LoginWindow = time.Minute
+	})
+	if env.cfg.TrustProxy {
+		t.Fatal("TrustProxy must default to off")
+	}
+
+	// Each attempt forges a different visitor address. If the header were read,
+	// every attempt would land in its own quota and all would be 401.
+	forged := []string{"198.51.100.10", "203.0.113.20", "192.0.2.30"}
+	for i, fake := range forged {
+		resp, _ := env.request(t, http.MethodPost, "/api/session", `{"password":"wrong"}`,
+			map[string]string{"X-Real-IP": fake})
+		want := http.StatusUnauthorized
+		if i >= 2 {
+			want = http.StatusTooManyRequests
+		}
+		if resp.StatusCode != want {
+			t.Fatalf("attempt %d (X-Real-IP %s) status = %d, want %d", i, fake, resp.StatusCode, want)
+		}
+	}
+
+	// X-Forwarded-For is equally ignored, so it cannot reopen the quota either.
+	resp, raw := env.request(t, http.MethodPost, "/api/session", `{"password":"wrong"}`,
+		map[string]string{"X-Forwarded-For": "198.51.100.99"})
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("X-Forwarded-For attempt status = %d, want 429 (body %s)", resp.StatusCode, raw)
+	}
+
+	// A correct password from the real peer is still blocked: the quota belongs
+	// to the peer address, which no header can change while trust is off.
+	resp, _ = env.request(t, http.MethodPost, "/api/session", `{"password":"`+testPassword+`"}`,
+		map[string]string{"X-Real-IP": "198.51.100.77"})
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("correct password with forged header status = %d, want 429", resp.StatusCode)
+	}
+}
+
+// TestLoginThrottlePerVisitorBehindTrustedProxy is the reported scenario: one
+// visitor exhausting the quota must not lock out another.
+func TestLoginThrottlePerVisitorBehindTrustedProxy(t *testing.T) {
+	env := newTestEnv(t, func(c *Config) {
+		c.TrustProxy = true
+		c.LoginMaxFailures = 2
+		c.LoginWindow = time.Minute
+	})
+	attacker := map[string]string{"X-Real-IP": "198.51.100.10"}
+	owner := map[string]string{"X-Real-IP": "203.0.113.20"}
+
+	for i := 0; i < 2; i++ {
+		resp, _ := env.request(t, http.MethodPost, "/api/session", `{"password":"wrong"}`, attacker)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("attacker attempt %d status = %d, want 401", i, resp.StatusCode)
+		}
+	}
+	// The attacker is now throttled.
+	resp, _ := env.request(t, http.MethodPost, "/api/session", `{"password":"wrong"}`, attacker)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("attacker third attempt status = %d, want 429", resp.StatusCode)
+	}
+
+	// The other visitor is untouched — the whole point of the fix. Before it, this
+	// returned 429 with Retry-After 600.
+	resp, raw := env.request(t, http.MethodPost, "/api/session", `{"password":"`+testPassword+`"}`, owner)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("owner login status = %d, want 200 (body %s)", resp.StatusCode, raw)
+	}
+	if resp.Header.Get("Retry-After") != "" {
+		t.Fatalf("owner login carried Retry-After %q", resp.Header.Get("Retry-After"))
+	}
+
+	// And the owner's own quota is independent, not shared with the attacker.
+	for i := 0; i < 2; i++ {
+		resp, _ := env.request(t, http.MethodPost, "/api/session", `{"password":"wrong"}`, owner)
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("owner wrong attempt %d status = %d, want 401", i, resp.StatusCode)
+		}
+	}
+	resp, _ = env.request(t, http.MethodPost, "/api/session", `{"password":"wrong"}`, owner)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("owner third wrong attempt status = %d, want 429", resp.StatusCode)
+	}
+	// The attacker's block still stands.
+	resp, _ = env.request(t, http.MethodPost, "/api/session", `{"password":"wrong"}`, attacker)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("attacker status = %d, want still 429", resp.StatusCode)
+	}
+}
+
+// TestTrustProxyRejectsUnusableClientAddress covers the trust-on rule: with no
+// trustworthy visitor address the request is refused, never charged to the
+// proxy's own address (which would merge every visitor into one quota).
+func TestTrustProxyRejectsUnusableClientAddress(t *testing.T) {
+	env := newTestEnv(t, func(c *Config) {
+		c.TrustProxy = true
+		c.LoginMaxFailures = 1
+		c.LoginWindow = time.Minute
+	})
+
+	for name, headers := range map[string]map[string]string{
+		"header absent":  nil,
+		"header empty":   {"X-Real-IP": ""},
+		"header blank":   {"X-Real-IP": "   "},
+		"not an ip":      {"X-Real-IP": "not-an-ip"},
+		"comma list":     {"X-Real-IP": "198.51.100.10, 203.0.113.20"},
+		"with port":      {"X-Real-IP": "198.51.100.10:12345"},
+		"hostname":       {"X-Real-IP": "proxy.internal"},
+		"only xff":       {"X-Forwarded-For": "198.51.100.10"},
+		"only forwarded": {"Forwarded": "for=198.51.100.10"},
+	} {
+		resp, raw := env.request(t, http.MethodPost, "/api/session", `{"password":"wrong"}`, headers)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d, want 400 (body %s)", name, resp.StatusCode, raw)
+		}
+		if code := errorCode(t, raw); code != "untrusted_client" {
+			t.Fatalf("%s: code = %q, want untrusted_client", name, code)
+		}
+	}
+
+	// None of those refusals may have consumed the peer's allowance: a well-formed
+	// address still gets the full quota (401 rather than 429). With
+	// LoginMaxFailures=1, this also proves it was admitted rather than blocked.
+	resp, raw := env.request(t, http.MethodPost, "/api/session", `{"password":"wrong"}`,
+		map[string]string{"X-Real-IP": "203.0.113.20"})
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("valid address after refusals: status = %d, want 401 (body %s)", resp.StatusCode, raw)
+	}
+}
+
+// TestTrustProxyChargesTheRealIPNotXForwardedFor pins the address source: the
+// visitor is X-Real-IP, so a spoofed X-Forwarded-For cannot reset the quota.
+func TestTrustProxyChargesTheRealIPNotXForwardedFor(t *testing.T) {
+	env := newTestEnv(t, func(c *Config) {
+		c.TrustProxy = true
+		c.LoginMaxFailures = 1
+		c.LoginWindow = time.Minute
+	})
+	visitor := "203.0.113.20"
+
+	resp, _ := env.request(t, http.MethodPost, "/api/session", `{"password":"wrong"}`,
+		map[string]string{"X-Real-IP": visitor, "X-Forwarded-For": "198.51.100.1"})
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("first attempt status = %d, want 401", resp.StatusCode)
+	}
+
+	// Same X-Real-IP, different X-Forwarded-For: still the same visitor.
+	resp, _ = env.request(t, http.MethodPost, "/api/session", `{"password":"wrong"}`,
+		map[string]string{"X-Real-IP": visitor, "X-Forwarded-For": "198.51.100.2"})
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second attempt status = %d, want 429 (X-Forwarded-For must not reset the quota)", resp.StatusCode)
+	}
+}
+
+// TestTrustProxyKeepsAtomicLimitPerVisitor re-checks the atomic reservation on
+// the proxy path, where the charged address comes from a header.
+func TestTrustProxyKeepsAtomicLimitPerVisitor(t *testing.T) {
+	const max = 3
+	const attempts = 16
+
+	env := newTestEnv(t, func(c *Config) {
+		c.TrustProxy = true
+		c.LoginMaxFailures = max
+		c.LoginWindow = time.Minute
+	})
+
+	statuses := make([]int, attempts)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			req, err := http.NewRequest(http.MethodPost, env.server.URL+"/api/session", strings.NewReader(`{"password":"wrong"}`))
+			if err != nil {
+				t.Errorf("build request: %v", err)
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Real-IP", "198.51.100.10")
+			<-start
+			resp, err := env.server.Client().Do(req)
+			if err != nil {
+				t.Errorf("attempt %d: %v", i, err)
+				return
+			}
+			defer resp.Body.Close()
+			io.Copy(io.Discard, resp.Body)
+			statuses[i] = resp.StatusCode
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	admitted := 0
+	for i, status := range statuses {
+		switch status {
+		case http.StatusUnauthorized:
+			admitted++
+		case http.StatusTooManyRequests:
+		default:
+			t.Fatalf("attempt %d status = %d, want 401 or 429", i, status)
+		}
+	}
+	if admitted != max {
+		t.Fatalf("admitted attempts = %d, want exactly %d", admitted, max)
+	}
+}
+
 func TestSessionGetIsAnonymous(t *testing.T) {
 	env := newTestEnv(t, nil)
 	resp, raw := env.request(t, http.MethodGet, "/api/session", "", nil)
@@ -1550,6 +1766,29 @@ func TestAssetsServeWhenProvided(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("session status = %d", resp.StatusCode)
+	}
+}
+
+// TestTrustProxyDefaultsToOff pins the default: the zero Config must not trust
+// forwarding headers, since a deployment that forgets to set it must fail safe.
+func TestTrustProxyDefaultsToOff(t *testing.T) {
+	if DefaultConfig().TrustProxy {
+		t.Fatal("DefaultConfig().TrustProxy = true, want false")
+	}
+	// And append a request whose peer is not an IP at all: with trust off the
+	// peer is used verbatim and must not be rejected, so the fail-safe path never
+	// refuses a login for lack of a parseable address.
+	env := newTestEnv(t, func(c *Config) {
+		c.LoginMaxFailures = 1
+		c.LoginWindow = time.Minute
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/session", strings.NewReader(`{"password":"wrong"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "unix-socket-peer"
+	rec := httptest.NewRecorder()
+	env.client.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (unparseable peer must still be charged, body %s)", rec.Code, rec.Body)
 	}
 }
 

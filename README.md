@@ -47,6 +47,7 @@ export APP_ORIGIN='http://127.0.0.1:8080'   # 必须与你在浏览器里输入�
 | `APP_ORIGIN` | 否 | `http://localhost:8080` | 浏览器访问本站的地址。写请求的同源校验以它为准；scheme 为 `https` 时会话 Cookie 自动带 `Secure`。 |
 | `DATA_DIR` | 否 | `./data` | SQLite 所在目录，服务启动时创建，文件固定为 `prompts.db`。目录权限按 `0700` 创建。 |
 | `LISTEN_ADDR` | 否 | `127.0.0.1:8080` | 监听地址。本机默认只听回环；容器内必须显式设为 `0.0.0.0:8080` 才可被外部访问。 |
+| `TRUST_PROXY` | 否 | `false` | 是否读 `X-Real-IP` 作为访客地址。**仅在应用端口不对外发布、只能经可信反代访问时才可设为 `true`**。详见下节。 |
 | `LLM_BASE_URL` | 否 | 空 | OpenAI 兼容基址，如 `https://api.example.com/v1`，实际请求 `{LLM_BASE_URL}/chat/completions`。 |
 | `LLM_API_KEY` | 否 | 空 | 上游密钥，作为 `Authorization: Bearer` 发送。 |
 | `LLM_MODEL` | 否 | 空 | 上游模型 id，记录在每条运行中。 |
@@ -56,6 +57,31 @@ export APP_ORIGIN='http://127.0.0.1:8080'   # 必须与你在浏览器里输入�
 `max_tokens=2048`），随每次运行记录在 `params` 中，不是环境变量。
 
 `APP_PASSWORD` 以任何方式泄露都等于泄露整个库；`.env` 建议 `chmod 600`，并且它已被 `.gitignore` 忽略。
+
+### 反向代理与 `TRUST_PROXY`
+
+登录限速按访客地址计额度。默认（`TRUST_PROXY=false`）只认 TCP 对端地址，**完全忽略** `X-Real-IP`、
+`X-Forwarded-For`、`Forwarded`。直接暴露时这是唯一安全的做法：这些头是客户端可伪造的。
+
+但经反代部署后，所有访客的对端地址都是代理本身，于是他们共用一份额度——一个人错 8 次密码，
+就把其他所有人锁在 429 之外（`Retry-After` 600 秒）。启用 `TRUST_PROXY=true` 解决这个问题，
+代价是引入一个必须严守的前提：
+
+> **前提（开启时）：应用端口只能经可信反代访问，不得对外发布。**
+
+反代必须在每个请求上用**连接对端 IP 覆盖**（而不是追加）`X-Real-IP`；后端只读这一个头，
+且只在其为单个合法 IP 时采纳。`X-Forwarded-For` 一律不读——它天生是列表，可被客户端前置伪造。
+
+违反前提的后果是限速失效：任何能直连应用端口的人都可以自带 `X-Real-IP: 1.2.3.4`，每次尝试换一个 IP，
+于是每次都是新额度。因此：
+
+- **不要**在 `compose.yaml` 的 `app` 服务上加 `ports:`；仓库里的 Compose 正是因此把它设为 `true`。
+- 若你把应用端口发布到宿主机（或让容器内其他服务可达），必须保持 `TRUST_PROXY=false`；
+  那种拓扑下限速只能按代理地址计数，请改用反代自身的限速能力。
+- 开启后若 `X-Real-IP` 缺失或非法，登录会被**直接拒绝**（400 `untrusted_client`），
+  而不是回退到代理地址——回退会把所有访客并进同一份额度，正是要避免的失败模式。
+
+除了限速地址，服务不依赖任何转发头：`APP_ORIGIN` 决定同源校验与 Cookie 的 `Secure`。
 
 ## 开发
 
@@ -164,6 +190,10 @@ docker compose up -d --build
 TLS 全部在 Caddy 终止；`APP_ORIGIN` 必须是真实的 `https://` 地址，服务据此自动给会话 Cookie 加 `Secure`。
 Caddy 会自动申请 Let's Encrypt 证书，前提是域名已解析到该主机且 80/443 可达。`deploy/Caddyfile` 里显式
 放宽了代理超时，因为一次优化同步等待最长 90 秒，任何更短的代理超时都会把它切断。
+
+Caddy 还会用连接对端 IP 覆盖 `X-Real-IP`，并由 `compose.yaml` 设 `TRUST_PROXY=true`，使登录限速按
+访客而非代理计数。这一步成立的前提是**应用端口不对外发布**——仓库里确实如此。如果给 `app` 服务
+加了 `ports:`，请同时把 `TRUST_PROXY` 改回 `false`，否则限速可被伪造头绕过（见上节）。
 
 站点是单实例设计：SQLite 单连接、会话在内存。**不要把它横向扩成多个副本**，会话不共享，数据目录也会互相冲突。
 

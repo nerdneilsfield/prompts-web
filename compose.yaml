@@ -6,7 +6,10 @@
 #   3. docker compose up -d --build
 #
 # The Go server listens on 0.0.0.0 inside the network but is not published to
-# the host: only Caddy can reach it, and only Caddy terminates TLS.
+# the host: only Caddy can reach it, and only Caddy terminates TLS. Because the
+# app port is unreachable from outside, Caddy's X-Real-IP can be trusted, and
+# compose.yaml sets TRUST_PROXY=true for that reason. Publishing the app port
+# (adding a `ports:` entry) would break that assumption.
 
 services:
   app:
@@ -21,9 +24,13 @@ services:
       # silently expose the service on loopback-only or a wrong origin.
       LISTEN_ADDR: 0.0.0.0:8080
       DATA_DIR: /data
+      # Only correct because this service publishes no host port: Caddy is the
+      # sole route in, and it overwrites X-Real-IP. Publishing the app port as
+      # well would let a client forge that header and evade the login throttle.
+      TRUST_PROXY: "true"
     volumes:
       - app-data:/data
-    # No `ports:` — the proxy is the only way in.
+    # No `ports:` — the proxy is the only way in. TRUST_PROXY depends on this.
 
   caddy:
     image: docker.io/library/caddy:2.10-alpine

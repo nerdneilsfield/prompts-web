@@ -34,8 +34,9 @@ http.ListenAndServe(":8080", handler)
 | `CookieSecure` | `bool` | `false` | 是否给会话 Cookie 加上 `Secure` 属性（仅 HTTPS 才回传）。**生产必须 `true`**（HTTPS 反代）；本地明文 HTTP 调试用 `false`。注意它只控制这一个属性：`false` 时 Cookie 照样下发，明文 HTTP 下浏览器也会发送它，区别仅是 HTTP 页面下不会被拒。任务 2 的主程序应据 `APP_ORIGIN` 自动推导该值，不新增环境变量旋钮。 |
 | `SessionTTL` | `time.Duration` | `24h` | 会话有效期。会话本身在内存中，重启即失效。 |
 | `AllowedOrigins` | `[]string` | 空 | 写请求允许的精确来源，形如 `https://prompts.example.com`。空表示只接受无 `Origin` 的请求（CLI）。每项必须以 `http://` 或 `https://` 开头。 |
-| `LoginMaxFailures` | `int` | `8` | 单个客户端 IP 在窗口内允许的**登录尝试**次数（成功与失败都计入，成功会清零），超出返回 429。额度在读请求体之前原子预占，因此并发尝试不能靠时间差绕过。 |
-| `LoginWindow` | `time.Duration` | `10m` | 失败计数的滑动窗口。 |
+| `LoginMaxFailures` | `int` | `8` | 单个访客地址在窗口内允许的**登录尝试**次数（成功与失败都计入，成功会清零），超出返回 429。额度在读请求体之前原子预占，因此并发尝试不能靠时间差绕过。地址来源见 `TrustProxy`。 |
+| `LoginWindow` | `time.Duration` | `10m` | 尝试计数的滑动窗口。 |
+| `TrustProxy` | `bool` | `false` | 是否读 `X-Real-IP` 作为访客地址。**仅在应用端口不对外发布、只能经可信反代访问时才可开启。** |
 | `RequestTimeout` | `time.Duration` | `90s` | 单次上游模型调用上限。生产保持 90 秒；测试可设更短。 |
 | `BaseURL` | `string` | 空 | OpenAI 兼容基址，如 `https://api.example.com/v1`。实际请求 `{BaseURL}/chat/completions`。`BaseURL`/`APIKey`/`Model` 三者全有才算已配置，缺任一即未配置（不阻止启动）。 |
 | `APIKey` | `string` | 空 | 上游密钥，作为 `Authorization: Bearer`。不写日志、不出现在任何响应。 |
@@ -46,6 +47,28 @@ http.ListenAndServe(":8080", handler)
 | `MaxBodyBytes` | `int64` | `0`（即 1 MiB） | 单次请求体上限，超出返回 413。 |
 
 `NewServer` 只对真正无法服务的配置返回错误：缺 `Password`、缺 `DBPath`、非正的 `SessionTTL`/`RequestTimeout`/`LoginMaxFailures`/`LoginWindow`、格式非法的 `AllowedOrigins`、负的 `MaxBodyBytes`，以及 `store` 为 nil。**模型配置不是启动前提**：缺 `BaseURL`/`APIKey`/`Model` 时服务照常启动，登录、Prompt 库、方案与已有运行的查询全部可用，仅新的优化请求返回 503（见下）。
+
+### 访客地址与 `TrustProxy`
+
+登录限速要按“谁在尝试”计数，而唯一无法伪造的来源是 TCP 对端地址。因此默认（`TrustProxy=false`）
+**完全忽略** `X-Real-IP`、`X-Forwarded-For`、`Forwarded`：这些头是客户端可自由设置的。
+
+经反代部署后所有访客的对端都是代理，他们就会共用一份额度：一人错误 `LoginMaxFailures` 次，
+其余所有人都被 429（`Retry-After` 等于剩余窗口）拦住。`TrustProxy=true` 解决这个问题，
+但要求部署满足：
+
+> **应用端口只能经可信反代访问，不得对外发布。**
+
+反代必须在每个请求上用连接对端 IP **覆盖**（不是追加）`X-Real-IP`。后端只读这一个头（不读 XFF），
+且只在其为**单个合法 IP** 时采纳；缺失、空白、逗号列表、带端口、主机名等一律视为不可用，
+此时登录直接返回 `400 untrusted_client`，**不会**回退到代理地址（回退会把所有访客并入同一额度）。
+被拒绝的请求**不消耗任何额度**。
+
+限速的实现细节（原子预占）与登录正常语义不因该开关改变：无论地址来自对端还是 `X-Real-IP`，
+每次尝试都在读请求体前原子占额度。
+
+若你把应用端口发布出来又开了 `TrustProxy`，限速即可被绕过：请求自带 `X-Real-IP: <任意 IP>`
+就能每次拿到新额度。仓库里的 Compose 不发布该端口，并因此设 `TRUST_PROXY=true`。
 
 ## 通用约定
 
@@ -104,7 +127,8 @@ Set-Cookie: session=<32 字节随机 hex>; Path=/; Max-Age=86400; HttpOnly; Same
 
 - `200 {"authenticated": true, "model_configured": true}` + `Set-Cookie`。成功登录的响应带与 `GET /api/session` 相同的派生 `model_configured`，前端登录后无需再查一次就能决定是否提供优化入口。
 - `401 {"error":{"code":"unauthorized",...}}` — 密码错误。
-- `429 {"error":{"code":"rate_limited",...}}` + `Retry-After`（秒）— 该 IP 的尝试额度已用尽，**此时正确密码同样被拒**，直到窗口滑过（成功登录会清零计数）。额度在读取请求体和比对密码之前原子预占，因此并发尝试不能超出上限；代价是超限时连格式非法的请求体也返回 429。
+- `429 {"error":{"code":"rate_limited",...}}` + `Retry-After`（秒）— 该地址的尝试额度已用尽，**此时正确密码同样被拒**，直到窗口滑过（成功登录会清零计数）。额度在读取请求体和比对密码之前原子预占，因此并发尝试不能超出上限；代价是超限时连格式非法的请求体也返回 429。
+- `400 untrusted_client` — `TrustProxy=true` 但 `X-Real-IP` 缺失或不可用（见「访客地址与 `TrustProxy`」）。此时不消耗额度。
 - `400 bad_request` — 空请求体或非法 JSON。
 
 ### `DELETE /api/session`
@@ -316,6 +340,7 @@ Run 对象：
 | `code` | HTTP | 含义 |
 |---|---|---|
 | `bad_request` | 400 | 请求体非法、字段缺失或越界 |
+| `untrusted_client` | 400 | `TrustProxy=true` 但 `X-Real-IP` 缺失或非单个合法 IP |
 | `bad_origin` | 403 | `Origin` 与 `AllowedOrigins` 不匹配 |
 | `bad_scheme` | 400 | `scheme_id` 不存在 |
 | `bad_source_run` | 409 | `source_run_id` 不存在或其运行未成功 |

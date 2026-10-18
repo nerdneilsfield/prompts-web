@@ -4,12 +4,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -50,6 +52,12 @@ func run() error {
 	cfg.APIKey = os.Getenv("LLM_API_KEY")
 	cfg.Model = os.Getenv("LLM_MODEL")
 
+	trustProxy, err := parseBoolEnv("TRUST_PROXY", false)
+	if err != nil {
+		return err
+	}
+	cfg.TrustProxy = trustProxy
+
 	store, err := app.OpenStore(cfg.DBPath)
 	if err != nil {
 		return err
@@ -79,7 +87,7 @@ func run() error {
 	defer stop()
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
-	log.Printf("listening on %s, origin %s, model configured: %t", srv.Addr, origin, cfg.BaseURL != "" && cfg.APIKey != "" && cfg.Model != "")
+	log.Printf("listening on %s, origin %s, model configured: %t, trust proxy: %t", srv.Addr, origin, cfg.BaseURL != "" && cfg.APIKey != "" && cfg.Model != "", cfg.TrustProxy)
 
 	select {
 	case err := <-errc:
@@ -89,4 +97,19 @@ func run() error {
 	shutdown, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout+10*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdown)
+}
+
+// parseBoolEnv reads a boolean switch. Only the forms Go itself accepts are
+// allowed; anything else is an error rather than a silent false, because a typo
+// here would silently disable the trusted-proxy path.
+func parseBoolEnv(key string, def bool) (bool, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return def, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean (true/false/1/0): %q", key, raw)
+	}
+	return v, nil
 }

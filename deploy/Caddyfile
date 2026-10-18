@@ -3,8 +3,12 @@
 # Replace the address with your real domain BEFORE starting: Caddy obtains a
 # Let's Encrypt certificate automatically, which requires that the domain
 # already resolves to this host and that ports 80 and 443 are reachable.
-# Caddy's automatic HTTPS already sets X-Forwarded-Proto; the Go server does not
-# read forwarded headers, so nothing else needs configuring here.
+#
+# X-Real-IP is set from the real connection address. The app charges the login
+# throttle to this address when TRUST_PROXY=true, so this proxy must overwrite
+# the header on every request: a client that could set it could forge a fresh
+# quota per login attempt. Caddy's automatic HTTPS already sets
+# X-Forwarded-Proto; the app reads neither that nor X-Forwarded-For.
 
 {$APP_DOMAIN} {
 	log {
@@ -21,6 +25,8 @@
 	# default has no read timeout, but keep the intent explicit for whoever
 	# edits this file: do not add a shorter proxy timeout here.
 	reverse_proxy app:8080 {
+		# Overwrite, never append: a client-supplied value must not survive.
+		header_up X-Real-IP {http.request.remote.host}
 		transport http {
 			read_timeout 120s
 			write_timeout 120s

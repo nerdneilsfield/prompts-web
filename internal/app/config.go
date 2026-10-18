@@ -42,6 +42,17 @@ type Config struct {
 	LoginMaxFailures int
 	LoginWindow      time.Duration
 
+	// TrustProxy enables reading X-Real-IP to identify the visitor behind a
+	// reverse proxy. Off by default, which means every forwarding header is
+	// ignored and the peer address is always used.
+	//
+	// Turning it on is only correct when the app port is reachable *exclusively*
+	// through a proxy that overwrites X-Real-IP with the real connection address.
+	// If the port is also published directly, a client can forge the header and
+	// evade the login throttle. While on, a request whose X-Real-IP is missing or
+	// not a single valid IP is refused rather than charged to the proxy's address.
+	TrustProxy bool
+
 	// RequestTimeout bounds one upstream model call. 90s in production.
 	RequestTimeout time.Duration
 

@@ -209,7 +209,17 @@ func (c *Client) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// The quota is reserved before the body is read and before the password is
 	// compared, so concurrent guesses cannot all pass a stale check. A correct
 	// password releases the reservation.
-	ip := clientIP(r)
+	//
+	// The visitor address is resolved first, and an unusable one is refused: with
+	// TrustProxy on there is no address to charge, and substituting the peer would
+	// merge every visitor into one quota.
+	ip, ok := c.clientIP(r)
+	if !ok {
+		// Distinct from bad_request: the body may be perfectly valid, it is the
+		// deployment that cannot attribute the request to a visitor.
+		fail(w, http.StatusBadRequest, "untrusted_client", "cannot determine client address")
+		return
+	}
 	retryAfter, admitted := c.limiter.reserve(ip, time.Now())
 	if !admitted {
 		w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())+1))
@@ -260,10 +270,35 @@ func (c *Client) cookieToken(r *http.Request) string {
 	return cookie.Value
 }
 
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+// clientIP returns the address the login throttle should charge this request to.
+//
+// With TrustProxy off, the peer address is the only trustworthy source: any
+// forwarding header is attacker-controlled and is ignored outright.
+//
+// With TrustProxy on, the peer is the proxy, so the visitor address must come
+// from the header the proxy overwrites. It is accepted only when it is a single
+// well-formed IP. Anything else — missing, empty, a comma list, a hostname, a
+// port suffix — reports false and the caller refuses the request. Falling back
+// to the peer here would charge every visitor to the proxy's address, which is
+// exactly the shared-quota failure this exists to prevent.
+func (c *Client) clientIP(r *http.Request) (string, bool) {
+	peer := trimPort(r.RemoteAddr)
+	if !c.cfg.TrustProxy {
+		return peer, true
+	}
+	forwarded := strings.TrimSpace(r.Header.Get("X-Real-IP"))
+	if net.ParseIP(forwarded) == nil {
+		return "", false
+	}
+	return forwarded, true
+}
+
+// trimPort reduces an address to its host. A value that already lacks a port, or
+// a non-IP peer address, is returned unchanged.
+func trimPort(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return r.RemoteAddr
+		return addr
 	}
 	return host
 }
