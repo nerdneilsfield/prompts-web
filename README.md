@@ -85,7 +85,7 @@ LLM_BASE_URL='https://api.example.com/v1' LLM_API_KEY='你的密钥' LLM_MODEL='
 APP_PASSWORD='换成你的密码' APP_ORIGIN=http://127.0.0.1:8080 ./prompts-web
 ```
 
-容器用 `-e` 传入同样的三个变量。
+`./prompts-web` 是发布的二进制，从源码构建时换成 `./bin/server`。容器用 `-e` 传入同样的三个变量。
 缺任意一个时，登录、Prompt 库和方案管理照常使用，新的优化请求返回 503。
 
 想先看到有内容的界面，用 [`docs/evaluation.md`](docs/evaluation.md) 里的命令导入 6 条演示 Prompt 和 3 个演示方案。

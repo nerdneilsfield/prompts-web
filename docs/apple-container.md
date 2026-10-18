@@ -31,14 +31,14 @@ container build -f Dockerfile -t prompts-web:local .
 镜像分三段：Bun 阶段执行 `bun install --frozen-lockfile` 与 `bun run build`；Go 阶段编译并嵌入 `web/dist`；
 运行阶段是 `alpine:3.22`，只含静态二进制和 CA 证书，以 uid 10001 运行。
 
-用本地镜像和宿主目录启动，端口 19080：
+用本地镜像和宿主目录启动（先停止并删除首节的同名容器）：
 
 ```bash
 mkdir -p /tmp/prompts-web-data
 
-container run -d --name prompts-web -p 19080:8080 \
+container run -d --name prompts-web -p 8080:8080 \
   -e APP_PASSWORD='换成你的密码' \
-  -e APP_ORIGIN=http://127.0.0.1:19080 \
+  -e APP_ORIGIN=http://127.0.0.1:8080 \
   -v /tmp/prompts-web-data:/data \
   prompts-web:local
 ```
@@ -46,7 +46,7 @@ container run -d --name prompts-web -p 19080:8080 \
 检查与停止：
 
 ```bash
-curl -sS http://127.0.0.1:19080/api/session
+curl -sS http://127.0.0.1:8080/api/session
 container logs prompts-web
 container stop prompts-web && container rm prompts-web
 ```
@@ -58,14 +58,14 @@ container stop prompts-web && container rm prompts-web
 container volume create prompts-web-data
 container run --rm --uid 0 -v prompts-web-data:/data --entrypoint sh prompts-web:local \
   -c 'chown 10001:10001 /data'
-container run -d --name prompts-web -p 19080:8080 \
-  -e APP_PASSWORD='换成你的密码' -e APP_ORIGIN=http://127.0.0.1:19080 \
+container run -d --name prompts-web -p 8080:8080 \
+  -e APP_PASSWORD='换成你的密码' -e APP_ORIGIN=http://127.0.0.1:8080 \
   -v prompts-web-data:/data prompts-web:local
 ```
 
 ## 备份与恢复
 
-备份前停止服务，对象是 `DATA_DIR` 整个目录。
+备份前停止服务，对象是 `DATA_DIR` 整个目录。命令使用发布的镜像；用本地构建的镜像时，把镜像名换成 `prompts-web:local`。
 
 ### 宿主目录
 
@@ -81,9 +81,9 @@ container start prompts-web
 mkdir -p /tmp/prompts-web-data-restored
 tar xzf /tmp/prompts-web-backup-2026-10-18.tar.gz -C /tmp/prompts-web-data-restored
 container stop prompts-web && container rm prompts-web
-container run -d --name prompts-web -p 19080:8080 \
-  -e APP_PASSWORD='换成你的密码' -e APP_ORIGIN=http://127.0.0.1:19080 \
-  -v /tmp/prompts-web-data-restored:/data prompts-web:local
+container run -d --name prompts-web -p 8080:8080 \
+  -e APP_PASSWORD='换成你的密码' -e APP_ORIGIN=http://127.0.0.1:8080 \
+  -v /tmp/prompts-web-data-restored:/data ghcr.io/nerdneilsfield/prompts-web:latest
 ```
 
 解包会覆盖目标目录里同名文件，先确认目标目录是空的。
@@ -97,7 +97,7 @@ mkdir -p /tmp/prompts-web-backups
 container run --rm --uid 0 \
   -v prompts-web-data:/data:ro \
   -v /tmp/prompts-web-backups:/backup \
-  --entrypoint sh prompts-web:local \
+  --entrypoint sh ghcr.io/nerdneilsfield/prompts-web:latest \
   -c 'tar czf /backup/prompts-web-backup.tar.gz -C /data .'
 ```
 
@@ -106,11 +106,22 @@ container run --rm --uid 0 \
 ```bash
 container volume create prompts-web-data-restored
 container run --rm --uid 0 -v prompts-web-data-restored:/data \
-  --entrypoint sh prompts-web:local -c 'chown 10001:10001 /data'
+  --entrypoint sh ghcr.io/nerdneilsfield/prompts-web:latest -c 'chown 10001:10001 /data'
 container run --rm --uid 0 \
   -v prompts-web-data-restored:/data -v /tmp/prompts-web-backups:/backup \
-  --entrypoint sh prompts-web:local \
+  --entrypoint sh ghcr.io/nerdneilsfield/prompts-web:latest \
   -c 'tar xzf /backup/prompts-web-backup.tar.gz -C /data'
 ```
 
 `--entrypoint sh` 必须保留，否则 `-c ...` 会被当作服务参数。`--uid 0` 让 `tar` 读取卷内全部文件。
+
+用恢复出来的卷重建容器，参数与原容器一致，只替换卷：
+
+```bash
+container rm prompts-web
+container run -d --name prompts-web -p 8080:8080 \
+  -e APP_PASSWORD='换成你的密码' -e APP_ORIGIN=http://127.0.0.1:8080 \
+  -v prompts-web-data-restored:/data ghcr.io/nerdneilsfield/prompts-web:latest
+```
+
+用原密码登录，确认 Prompt 都在。原卷 `prompts-web-data` 保留。

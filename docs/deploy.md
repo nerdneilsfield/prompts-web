@@ -57,7 +57,7 @@ tar xzf prompts-web_0.1.0_linux_amd64.tar.gz
 
 ```bash
 APP_PASSWORD='换成你的密码' APP_ORIGIN=http://你的主机名:8080 \
-LISTEN_ADDR=0.0.0.0:8080 DATA_DIR=/var/lib/prompts-web ./prompts-web
+LISTEN_ADDR=0.0.0.0:8080 DATA_DIR=$HOME/prompts-web-data ./prompts-web
 ```
 
 长期运行时交给 systemd、launchd 等进程管理器，把环境变量写进它的配置。
@@ -81,8 +81,9 @@ docker run -d --name prompts-web -p 8080:8080 \
 用宿主目录保存数据时，目录属主设为 10001：
 
 ```bash
-mkdir -p /srv/prompts-web && sudo chown 10001:10001 /srv/prompts-web
-docker run -d -p 8080:8080 -e APP_PASSWORD='换成你的密码' -e APP_ORIGIN=http://127.0.0.1:8080 \
+sudo mkdir -p /srv/prompts-web && sudo chown 10001:10001 /srv/prompts-web
+docker run -d --name prompts-web -p 8080:8080 \
+  -e APP_PASSWORD='换成你的密码' -e APP_ORIGIN=http://127.0.0.1:8080 \
   -v /srv/prompts-web:/data ghcr.io/nerdneilsfield/prompts-web:latest
 ```
 
@@ -119,17 +120,19 @@ docker compose up -d --build
 
 ### 宿主目录
 
+数据目录属于 uid 10001，权限 `0700`，用 `sudo` 读写：
+
 ```bash
 docker stop prompts-web
-tar czf prompts-web-backup-$(date +%F).tar.gz -C /srv/prompts-web .
+sudo tar czf prompts-web-backup-$(date +%F).tar.gz -C /srv/prompts-web .
 docker start prompts-web
 ```
 
 恢复到一个新目录，用它启动：
 
 ```bash
-mkdir -p /srv/prompts-web-restored
-tar xzf prompts-web-backup-2026-10-18.tar.gz -C /srv/prompts-web-restored
+sudo mkdir -p /srv/prompts-web-restored
+sudo tar xzf prompts-web-backup-2026-10-18.tar.gz -C /srv/prompts-web-restored
 sudo chown -R 10001:10001 /srv/prompts-web-restored
 docker stop prompts-web && docker rm prompts-web
 docker run -d --name prompts-web -p 8080:8080 \
@@ -137,7 +140,7 @@ docker run -d --name prompts-web -p 8080:8080 \
   -v /srv/prompts-web-restored:/data ghcr.io/nerdneilsfield/prompts-web:latest
 ```
 
-解包会覆盖目标目录里同名文件，先确认目标目录是空的。
+解包会覆盖目标目录里同名文件，先确认目标目录是空的。用原密码登录，确认 Prompt 都在。
 
 ### Docker 命名卷
 
@@ -157,6 +160,17 @@ docker run --rm --user 0:0 -v prompts-web-data-restored:/data -v "$PWD/backups:/
   --entrypoint sh ghcr.io/nerdneilsfield/prompts-web:latest \
   -c 'tar xzf /backup/prompts-web-backup.tar.gz -C /data && chown -R 10001:10001 /data'
 ```
+
+用恢复出来的卷重建容器，参数与原容器一致，只替换卷：
+
+```bash
+docker rm prompts-web
+docker run -d --name prompts-web -p 8080:8080 \
+  -e APP_PASSWORD='换成你的密码' -e APP_ORIGIN=http://127.0.0.1:8080 \
+  -v prompts-web-data-restored:/data ghcr.io/nerdneilsfield/prompts-web:latest
+```
+
+用原密码登录，确认 Prompt 都在。原卷 `prompts-web-data` 保留，需要时可以重新挂回。
 
 `--entrypoint sh` 保留在命令里，`-c ...` 才会交给 shell 执行。`--user 0:0` 让 `tar` 读取卷内全部文件。
 

@@ -57,6 +57,7 @@ archives:
       - README.md
       - .env.example
       - docs/api.md
+      - docs/apple-container.md
       - docs/deploy.md
       - docs/development.md
       - docs/evaluation.md
