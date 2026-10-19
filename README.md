@@ -13,6 +13,7 @@
 - **查找**：点标签筛选，输入关键词搜索标题和正文，两者可以叠加。
 - **优化方案**：方案由名称和正文组成，正文告诉模型怎么改。每次运行保存当时的方案快照，之后改方案不影响历史记录。
 - **对照编辑**：工作台把原文与结果并排显示，下方给出字符差异、长度变化和 `{{变量}}` 的丢失与新增。结果可以直接修改，再另存为新 Prompt，原条目保持不变。
+- **MCP 接入（可选）**：设置 `MCP_TOKEN` 后，AI 客户端可以直接检索库、写 Prompt、读方案、跑优化。
 
 ![优化工作台](docs/images/workbench.png)
 
@@ -106,6 +107,7 @@ APP_PASSWORD='换成你的密码' APP_ORIGIN=http://127.0.0.1:8080 ./prompts-web
 | [`docs/development.md`](docs/development.md) | 目录结构、构建检查、前后端分离调试、测试 |
 | [`docs/evaluation.md`](docs/evaluation.md) | 导入演示数据，运行 JSONL 评测 |
 | [`docs/api.md`](docs/api.md) | HTTP 接口：请求、响应、错误码、字段长度 |
+| [`docs/mcp.md`](docs/mcp.md) | MCP 端点：开启方式、工具清单、错误语义、Pi 等客户端配置 |
 | [`docs/releasing.md`](docs/releasing.md) | 维护者：本地快照构建与打标签发布 |
 
 打 `v*` 标签后，GitHub Actions 用 GoReleaser 构建 Linux、macOS、Windows 的 amd64 与 arm64 归档，附到 Release 页面，同时发布 `checksums.txt` 和上面的多架构镜像。

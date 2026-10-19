@@ -10,6 +10,12 @@ import (
 // dominating the database and the JSON responses.
 const maxFieldRunes = 200_000
 
+// Search term bounds, shared by the REST list and the MCP search tool.
+const (
+	maxSearchQueryRunes = 500
+	maxSearchTagRunes   = 200
+)
+
 type promptPayload struct {
 	Title       string   `json:"title"`
 	Body        string   `json:"body"`
@@ -25,7 +31,7 @@ type schemePayload struct {
 func (c *Client) handlePromptList(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	tag := r.URL.Query().Get("tag")
-	if len([]rune(query)) > 500 || len([]rune(tag)) > 200 {
+	if len([]rune(query)) > maxSearchQueryRunes || len([]rune(tag)) > maxSearchTagRunes {
 		fail(w, http.StatusBadRequest, "bad_request", "search terms are too long")
 		return
 	}
@@ -50,21 +56,21 @@ func (c *Client) handlePromptGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, prompt)
 }
 
-// validatePrompt normalizes and checks a prompt payload. It writes the error
-// response itself and reports false.
-func (c *Client) validatePrompt(w http.ResponseWriter, p *promptPayload) bool {
+// normalizePrompt checks a prompt payload and rewrites it in normalized form
+// (trimmed title, deduplicated tags). The returned message is client-safe: it is
+// what the API reports as 400 bad_request and what an MCP tool reports as an
+// IsError result, so the REST handler and the MCP tool accept exactly the same
+// payloads.
+func normalizePrompt(p *promptPayload) error {
 	title, ok := trimmed(p.Title)
 	if !ok {
-		fail(w, http.StatusBadRequest, "bad_request", "title must not be empty")
-		return false
+		return errors.New("title must not be empty")
 	}
 	if strings.TrimSpace(p.Body) == "" {
-		fail(w, http.StatusBadRequest, "bad_request", "body must not be empty")
-		return false
+		return errors.New("body must not be empty")
 	}
 	if len([]rune(title)) > maxFieldRunes || len([]rune(p.Body)) > maxFieldRunes {
-		fail(w, http.StatusBadRequest, "bad_request", "title or body is too long")
-		return false
+		return errors.New("title or body is too long")
 	}
 	tags := make([]string, 0, len(p.Tags))
 	seen := map[string]bool{}
@@ -74,15 +80,13 @@ func (c *Client) validatePrompt(w http.ResponseWriter, p *promptPayload) bool {
 			continue
 		}
 		if len([]rune(tag)) > 64 {
-			fail(w, http.StatusBadRequest, "bad_request", "tag is too long")
-			return false
+			return errors.New("tag is too long")
 		}
 		seen[tag] = true
 		tags = append(tags, tag)
 	}
 	if len(tags) > 32 {
-		fail(w, http.StatusBadRequest, "bad_request", "too many tags")
-		return false
+		return errors.New("too many tags")
 	}
 	p.Title = title
 	p.Tags = tags
@@ -93,6 +97,16 @@ func (c *Client) validatePrompt(w http.ResponseWriter, p *promptPayload) bool {
 		} else {
 			p.SourceRunID = &id
 		}
+	}
+	return nil
+}
+
+// validatePrompt writes the 400 response itself and reports whether the payload
+// was accepted.
+func (c *Client) validatePrompt(w http.ResponseWriter, p *promptPayload) bool {
+	if err := normalizePrompt(p); err != nil {
+		fail(w, http.StatusBadRequest, "bad_request", err.Error())
+		return false
 	}
 	return true
 }

@@ -12,6 +12,7 @@ func NewServer(store *Store, cfg Config, assets fs.FS) (http.Handler, error)
 
 - `store` 由 `OpenStore(path)` 得到，进程内单例。
 - `assets` 可以是 `nil`（纯 API，测试用）。非 nil 时挂载 `GET /` 提供前端静态资源；`/api/*` 始终优先。
+- `/mcp` 是 MCP（Streamable HTTP）端点，总会被注册：`MCPToken` 为空时对任何请求返回 404（不会回落到静态资源），非空时只接 `Authorization: Bearer <MCPToken>`。工具与错误语义见 [`mcp.md`](mcp.md)。
 - 入口不启动任何后台 goroutine。会话与登录限速表在相关请求中顺带清理。
 
 ```go
@@ -44,7 +45,8 @@ http.ListenAndServe(":8080", handler)
 | `Temperature` | `float64` | `0.2` | 实际发送并记录在 `params`。 |
 | `TopP` | `float64` | `1` | 同上。 |
 | `MaxTokens` | `int` | `2048` | 同上。 |
-| `MaxBodyBytes` | `int64` | `0`（即 1 MiB） | 单次请求体上限，超出返回 413。 |
+| `MaxBodyBytes` | `int64` | `0`（即 1 MiB） | 单次请求体上限，超出返回 413。`/mcp` 也用它。 |
+| `MCPToken` | `string` | 空 | MCP 端点的 Bearer 令牌。空表示不启用该端点（`/mcp` 全部 404）。与 `Password`/会话 Cookie 完全独立，见 [`mcp.md`](mcp.md)。 |
 
 `NewServer` 只对真正无法服务的配置返回错误：缺 `Password`、缺 `DBPath`、非正的 `SessionTTL`/`RequestTimeout`/`LoginMaxFailures`/`LoginWindow`、格式非法的 `AllowedOrigins`、负的 `MaxBodyBytes`，以及 `store` 为 nil。**模型配置不是启动前提**：缺 `BaseURL`/`APIKey`/`Model` 时服务照常启动，登录、Prompt 库、方案与已有运行的查询全部可用，仅新的优化请求返回 503（见下）。
 

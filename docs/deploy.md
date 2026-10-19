@@ -20,6 +20,7 @@
 | `LLM_BASE_URL` | 空 | Go 后端访问的 OpenAI 兼容 API 根地址，后端请求 `{LLM_BASE_URL}/chat/completions`。可用公网域名或局域网地址，取决于运行后端的机器能否连上。 |
 | `LLM_API_KEY` | 空 | 上游密钥，以 `Authorization: Bearer` 发送。 |
 | `LLM_MODEL` | 空 | 上游模型名，记录在每次运行里。 |
+| `MCP_TOKEN` | 空 | MCP 端点（`/mcp`）的 Bearer 令牌。空表示不启用，端点对任何请求都返回 404。生成：`openssl rand -hex 32`。见 [`mcp.md`](mcp.md)。 |
 
 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` 三个都设置，优化功能才可用。缺任意一个时，服务照常启动，
 登录、库和方案管理可用，新的优化请求返回 503 `model_not_configured`。
@@ -43,6 +44,14 @@
 服务只读取 `X-Real-IP`，且只接受单个合法 IP；开启后请求缺少该头或内容非法时，登录返回 400 `untrusted_client`。
 
 应用端口对宿主机发布，或直接面向外网时，保持 `TRUST_PROXY=false`。给 `app` 服务加 `ports:` 之前，先把 `TRUST_PROXY` 改回 `false`。
+
+## MCP 端点
+
+设置 `MCP_TOKEN` 后，`/mcp` 上会多一个 MCP（Streamable HTTP）端点，供本地或远程的 MCP 客户端使用；不设置则返回 404。
+它与会话 Cookie 互不相干，只认 `Authorization: Bearer`，来源仍按 `APP_ORIGIN` 校验，请求体仍受 `MaxBodyBytes` 限制。
+工具清单、客户端配置（含 Pi 的 `mcp.json`）和错误语义见 [`mcp.md`](mcp.md)。
+
+反向代理只需放行 `POST /mcp`；`deploy/Caddyfile` 现有的 2 MiB 请求体上限与 120 秒读写超时已经够用，不必为新端点加规则。
 
 ## 二进制
 

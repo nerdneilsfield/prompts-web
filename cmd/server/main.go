@@ -51,6 +51,8 @@ func run() error {
 	cfg.BaseURL = os.Getenv("LLM_BASE_URL")
 	cfg.APIKey = os.Getenv("LLM_API_KEY")
 	cfg.Model = os.Getenv("LLM_MODEL")
+	// Optional: without it the MCP endpoint stays off and answers 404.
+	cfg.MCPToken = os.Getenv("MCP_TOKEN")
 
 	trustProxy, err := parseBoolEnv("TRUST_PROXY", false)
 	if err != nil {
@@ -87,7 +89,7 @@ func run() error {
 	defer stop()
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
-	log.Printf("listening on %s, origin %s, model configured: %t, trust proxy: %t", srv.Addr, origin, cfg.BaseURL != "" && cfg.APIKey != "" && cfg.Model != "", cfg.TrustProxy)
+	log.Printf("listening on %s, origin %s, model configured: %t, mcp enabled: %t, trust proxy: %t", srv.Addr, origin, cfg.BaseURL != "" && cfg.APIKey != "" && cfg.Model != "", cfg.MCPToken != "", cfg.TrustProxy)
 
 	select {
 	case err := <-errc:

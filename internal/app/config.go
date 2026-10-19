@@ -25,6 +25,11 @@ type Config struct {
 	// DBPath is the SQLite file. Required.
 	DBPath string
 
+	// MCPToken enables the MCP endpoint at /mcp. Every MCP request must carry it
+	// as `Authorization: Bearer <token>`; the session cookie is never accepted
+	// there. Empty leaves the feature off: /mcp answers 404 for every request.
+	MCPToken string
+
 	// CookieSecure sets the Secure flag on the session cookie. Must be true in
 	// production (HTTPS reverse proxy); false only for plain-HTTP local dev.
 	CookieSecure bool

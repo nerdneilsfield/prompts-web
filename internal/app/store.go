@@ -112,13 +112,23 @@ func scanPrompt(row scanner) (Prompt, error) {
 	if err := row.Scan(&p.ID, &p.Title, &p.Body, &tags, &p.SourceRunID, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return Prompt{}, err
 	}
-	if err := json.Unmarshal([]byte(tags), &p.Tags); err != nil {
-		return Prompt{}, fmt.Errorf("decode tags: %w", err)
+	tagList, err := decodeTags(tags)
+	if err != nil {
+		return Prompt{}, err
 	}
-	if p.Tags == nil {
-		p.Tags = []string{}
-	}
+	p.Tags = tagList
 	return p, nil
+}
+
+func decodeTags(raw string) ([]string, error) {
+	var tags []string
+	if err := json.Unmarshal([]byte(raw), &tags); err != nil {
+		return nil, fmt.Errorf("decode tags: %w", err)
+	}
+	if tags == nil {
+		tags = []string{}
+	}
+	return tags, nil
 }
 
 func (s *Store) Prompt(id int64) (Prompt, error) {
@@ -150,6 +160,58 @@ func (s *Store) Prompts(query, tag string) ([]Prompt, error) {
 // ErrSourceRun means the referenced run is missing or did not succeed; a failed
 // or unfinished run is not a legitimate provenance record.
 var ErrSourceRun = errors.New("source run must have succeeded")
+
+// PromptSummary is one row of a paginated listing. It deliberately carries no
+// body: a caller browsing hundreds of prompts should not pay for the text of
+// every one of them.
+type PromptSummary struct {
+	ID        int64    `json:"id"`
+	Title     string   `json:"title"`
+	Tags      []string `json:"tags"`
+	Snippet   string   `json:"snippet"`
+	UpdatedAt string   `json:"updated_at"`
+}
+
+// snippetRunes bounds the body excerpt in a summary. It is applied by SQLite's
+// substr(), which counts characters rather than bytes for text values.
+const snippetRunes = 200
+
+// SearchPrompts returns one page of summaries matching the same filters as
+// Prompts(), plus whether another row exists beyond this page. Pagination
+// happens in SQL so an offset never loads the skipped rows.
+func (s *Store) SearchPrompts(query, tag string, limit, offset int) ([]PromptSummary, bool, error) {
+	rows, err := s.db.Query(`SELECT id,title,tags,substr(body,1,?),updated_at FROM prompts WHERE
+ (?='' OR instr(lower(title),lower(?))>0 OR instr(lower(body),lower(?))>0)
+ AND (?='' OR EXISTS (SELECT 1 FROM json_each(prompts.tags) WHERE value=?))
+ ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?`,
+		snippetRunes, query, query, query, tag, tag, limit+1, offset)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	items := []PromptSummary{}
+	for rows.Next() {
+		var item PromptSummary
+		var tags string
+		if err := rows.Scan(&item.ID, &item.Title, &tags, &item.Snippet, &item.UpdatedAt); err != nil {
+			return nil, false, err
+		}
+		if item.Tags, err = decodeTags(tags); err != nil {
+			return nil, false, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	// The extra row is the only thing that reveals a following page; it is not
+	// part of the answer.
+	hasMore := len(items) > limit
+	if hasMore {
+		items = items[:limit]
+	}
+	return items, hasMore, nil
+}
 
 func encodeTags(tags []string) string {
 	if tags == nil {

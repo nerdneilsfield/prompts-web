@@ -29,6 +29,8 @@ type Client struct {
 	assets  fs.FS
 	session *sessionTable
 	limiter *loginLimiter
+	// mcp is the Streamable HTTP endpoint. Nil when no MCP token is configured.
+	mcp http.Handler
 }
 
 // NewServer builds the API handler. assets may be nil (API-only tests, or a
@@ -55,6 +57,9 @@ func newServer(store *Store, cfg Config, assets fs.FS, logger *log.Logger) (*Cli
 		assets:  assets,
 		session: newSessionTable(cfg.SessionTTL),
 		limiter: newLoginLimiter(cfg.LoginMaxFailures, cfg.LoginWindow),
+	}
+	if cfg.MCPToken != "" {
+		c.mcp = newMCPHandler(c)
 	}
 	c.routes()
 	return c, nil
@@ -87,7 +92,15 @@ func (c *Client) routes() {
 	}
 }
 
-func (c *Client) ServeHTTP(w http.ResponseWriter, r *http.Request) { c.mux.ServeHTTP(w, r) }
+func (c *Client) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Gate every method before the static-file mux: disabled means 404, and
+	// enabled requests always require the MCP token, including unknown methods.
+	if r.URL.Path == "/mcp" {
+		c.handleMCP(w, r)
+		return
+	}
+	c.mux.ServeHTTP(w, r)
+}
 
 // ---- responses ----
 
@@ -118,8 +131,8 @@ func fail(w http.ResponseWriter, status int, code, message string) {
 // internal reports an unexpected failure. The underlying error goes to the log
 // only: it may quote request text or upstream bodies.
 func (c *Client) internal(w http.ResponseWriter, context string, err error) {
-	c.log.Printf("error: %s: %v", context, err)
-	fail(w, http.StatusInternalServerError, "internal", "internal error")
+	failure := c.internalFailure(context, err)
+	fail(w, failure.status, failure.code, failure.message)
 }
 
 // decodeJSON reads the body into v, bounded by MaxBodyBytes. It rejects an empty

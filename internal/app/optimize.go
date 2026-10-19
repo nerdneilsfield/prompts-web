@@ -17,29 +17,66 @@ type optimizeRequest struct {
 	SchemeID int64 `json:"scheme_id"`
 }
 
+// apiFailure is a client-visible failure: an HTTP status plus the same code and
+// message the JSON error envelope carries. MCP tools report the code and message
+// as an IsError result instead of a status; both surfaces share one decision
+// about what went wrong.
+type apiFailure struct {
+	status  int
+	code    string
+	message string
+}
+
+func badRequest(message string) *apiFailure {
+	return &apiFailure{http.StatusBadRequest, "bad_request", message}
+}
+
+// internalFailure logs the underlying error and reports a generic failure. The
+// detail stays in the log: it may quote request text, a file path or an upstream
+// body.
+func (c *Client) internalFailure(context string, err error) *apiFailure {
+	c.log.Printf("error: %s: %v", context, err)
+	return &apiFailure{http.StatusInternalServerError, "internal", "internal error"}
+}
+
 func (c *Client) handleOptimize(w http.ResponseWriter, r *http.Request) {
 	var req optimizeRequest
 	if !c.decodeJSON(w, r, &req) {
 		return
 	}
-	requestID := req.RequestID
+	run, failure := c.executeOptimization(r.Context(), req)
+	if failure != nil {
+		fail(w, failure.status, failure.code, failure.message)
+		return
+	}
+	// A run still marked running belongs to another request that won the claim;
+	// reporting 200 would claim a result this response does not carry.
+	status := http.StatusOK
+	if run.Status == RunRunning {
+		status = http.StatusAccepted
+	}
+	writeJSON(w, status, run)
+}
+
+// executeOptimization performs one optimization request: validation, replay of a
+// recorded request ID, the single upstream call and settling the run. It writes
+// no HTTP response, so the REST handler and the MCP tool call it directly rather
+// than forwarding to each other. ctx carries the client's lifetime; the upstream
+// deadline is applied here.
+func (c *Client) executeOptimization(ctx context.Context, req optimizeRequest) (Run, *apiFailure) {
 	// A UUID satisfies this. Restricting the charset keeps the ID usable as a URL
 	// path segment on the way back in through GET /api/optimizations/{requestId}.
-	if !validRequestID(requestID) {
-		fail(w, http.StatusBadRequest, "bad_request", "request_id must be 1-128 characters of [A-Za-z0-9._-]")
-		return
+	if !validRequestID(req.RequestID) {
+		return Run{}, badRequest("request_id must be 1-128 characters of [A-Za-z0-9._-]")
 	}
 	if strings.TrimSpace(req.Input) == "" {
-		fail(w, http.StatusBadRequest, "bad_request", "input must not be empty")
-		return
+		return Run{}, badRequest("input must not be empty")
 	}
 	if len([]rune(req.Input)) > maxFieldRunes {
-		fail(w, http.StatusBadRequest, "bad_request", "input is too long")
-		return
+		return Run{}, badRequest("input is too long")
 	}
 	if req.SchemeID <= 0 {
-		fail(w, http.StatusBadRequest, "bad_request", "scheme_id must be a positive integer")
-		return
+		return Run{}, badRequest("scheme_id must be a positive integer")
 	}
 
 	// A repeated request ID is decided by the stored record alone: same submitted
@@ -48,29 +85,27 @@ func (c *Client) handleOptimize(w http.ResponseWriter, r *http.Request) {
 	// editing or deleting the scheme leaves replay intact. This runs before the
 	// model check so an already-recorded run stays readable and replayable even
 	// while the endpoint is unconfigured.
-	if existing, err := c.store.Run(requestID); err == nil {
-		c.replayRun(w, existing, req)
-		return
+	if existing, err := c.store.Run(req.RequestID); err == nil {
+		if conflict := replayConflict(existing, req); conflict != nil {
+			return Run{}, conflict
+		}
+		return existing, nil
 	} else if !errors.Is(err, sql.ErrNoRows) {
-		c.internal(w, "load existing run", err)
-		return
+		return Run{}, c.internalFailure("load existing run", err)
 	}
 
 	// A new run needs an upstream. Refuse without inserting a running row: an
 	// unconfigured endpoint is a server-side condition, not a failed attempt.
 	if !c.cfg.modelConfigured() {
-		fail(w, http.StatusServiceUnavailable, "model_not_configured", "model endpoint is not configured")
-		return
+		return Run{}, &apiFailure{http.StatusServiceUnavailable, "model_not_configured", "model endpoint is not configured"}
 	}
 
 	scheme, err := c.store.Scheme(req.SchemeID)
 	if errors.Is(err, sql.ErrNoRows) {
-		fail(w, http.StatusBadRequest, "bad_scheme", "scheme does not exist")
-		return
+		return Run{}, &apiFailure{http.StatusBadRequest, "bad_scheme", "scheme does not exist"}
 	}
 	if err != nil {
-		c.internal(w, "load scheme for optimization", err)
-		return
+		return Run{}, c.internalFailure("load scheme for optimization", err)
 	}
 
 	// Render the upstream body before claiming the ID so a misconfigured model
@@ -78,7 +113,7 @@ func (c *Client) handleOptimize(w http.ResponseWriter, r *http.Request) {
 	body, params := c.buildRequest(req.Input, scheme.Body)
 
 	run := Run{
-		RequestID:      requestID,
+		RequestID:      req.RequestID,
 		Input:          req.Input,
 		SchemeID:       scheme.ID,
 		SchemeName:     scheme.Name,
@@ -93,44 +128,42 @@ func (c *Client) handleOptimize(w http.ResponseWriter, r *http.Request) {
 	// compares its raw payload against the recorded one.
 	claimed, err := c.store.ClaimRun(run)
 	if err != nil {
-		c.internal(w, "claim run", err)
-		return
+		return Run{}, c.internalFailure("claim run", err)
 	}
 	if !claimed {
-		existing, err := c.store.Run(requestID)
+		existing, err := c.store.Run(req.RequestID)
 		if err != nil {
-			c.internal(w, "load claimed run", err)
-			return
+			return Run{}, c.internalFailure("load claimed run", err)
 		}
-		c.replayRun(w, existing, req)
-		return
+		if conflict := replayConflict(existing, req); conflict != nil {
+			return Run{}, conflict
+		}
+		return existing, nil
 	}
 
 	// The timeout belongs to this one upstream call; a client disconnect
-	// cancels it through r.Context().
-	ctx, cancel := context.WithTimeout(r.Context(), c.cfg.RequestTimeout)
+	// cancels it through ctx.
+	callCtx, cancel := context.WithTimeout(ctx, c.cfg.RequestTimeout)
 	defer cancel()
-	result, kind := c.optimize(ctx, body)
+	result, kind := c.optimize(callCtx, body)
 
 	status := RunSucceeded
 	if kind != "" {
 		status = RunFailed
 	}
 	// The run must be settled before it is reported. If this write fails the row
-	// is still "running", and returning 200 with that row would claim a success or
-	// a classification the database does not hold. Report the storage failure and
-	// keep the row for a later GET instead. The model is not called again.
-	if err := c.store.FinishRun(requestID, status, result, kind); err != nil {
-		c.internal(w, "finish run", err)
-		return
+	// is still "running", and reporting success would claim a classification the
+	// database does not hold. Report the storage failure and keep the row for a
+	// later GET instead. The model is not called again.
+	if err := c.store.FinishRun(req.RequestID, status, result, kind); err != nil {
+		return Run{}, c.internalFailure("finish run", err)
 	}
 
-	stored, err := c.store.Run(requestID)
+	stored, err := c.store.Run(req.RequestID)
 	if err != nil {
-		c.internal(w, "reload run", err)
-		return
+		return Run{}, c.internalFailure("reload run", err)
 	}
-	writeJSON(w, http.StatusOK, stored)
+	return stored, nil
 }
 
 // validRequestID accepts an opaque client-generated token of URL-safe characters.
@@ -146,20 +179,15 @@ func validRequestID(id string) bool {
 	return true
 }
 
-// replayRun answers a request whose ID is already recorded. A settled run
-// replays its stored result; a run still executing is reported as such rather
-// than waited on, so a duplicate never starts a second upstream call and never
-// blocks.
-func (c *Client) replayRun(w http.ResponseWriter, existing Run, req optimizeRequest) {
+// replayConflict decides whether an existing run for the same ID describes the
+// same submission. A settled run replays its stored result, a run still executing
+// is reported as such by the caller, and a different payload is a conflict: one
+// ID cannot stand for two runs.
+func replayConflict(existing Run, req optimizeRequest) *apiFailure {
 	if existing.Input != req.Input || existing.SchemeID != req.SchemeID {
-		fail(w, http.StatusConflict, "request_id_conflict", "request_id was already used with a different input or scheme")
-		return
+		return &apiFailure{http.StatusConflict, "request_id_conflict", "request_id was already used with a different input or scheme"}
 	}
-	status := http.StatusOK
-	if existing.Status == RunRunning {
-		status = http.StatusAccepted
-	}
-	writeJSON(w, status, existing)
+	return nil
 }
 
 func (c *Client) handleRunGet(w http.ResponseWriter, r *http.Request) {
