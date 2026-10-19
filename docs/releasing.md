@@ -14,7 +14,7 @@
 | `v1.2.3` | `v1.2.3`、`latest` | 正式版 |
 | `v1.2.3-rc.1` | `v1.2.3-rc.1` | 预发布 |
 
-每个归档包含：二进制 `prompts-web`、`README.md`、`.env.example`、`docs/` 下的 `api.md`、`apple-container.md`、`deploy.md`、`development.md`、`evaluation.md`、`releasing.md`，以及 `docs/images/` 下的两张截图。
+每个归档包含：二进制 `prompts-web`、`README.md`、`.env.example`、`docs/` 下的 `api.md`、`apple-container.md`、`deploy.md`、`development.md`、`evaluation.md`、`mcp.md`、`releasing.md`，以及 `docs/images/` 下的两张截图。
 
 ## 本地快照
 

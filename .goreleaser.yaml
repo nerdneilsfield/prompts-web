@@ -61,6 +61,7 @@ archives:
       - docs/deploy.md
       - docs/development.md
       - docs/evaluation.md
+      - docs/mcp.md
       - docs/releasing.md
       - docs/images/library.png
       - docs/images/workbench.png
