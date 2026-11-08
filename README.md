@@ -18,6 +18,19 @@
 
 *演示实例：优化工作台。左侧为原文，右侧为可编辑的结果，下方是字符差异；原文里的 `{{记录}}` 保留在结果中。*
 
+## 通过 Homebrew / Scoop 安装
+
+```bash
+# macOS / Linux
+brew install --cask nerdneilsfield/apps/prompts-web
+```
+
+```powershell
+# Windows
+scoop bucket add nerdneilsfield https://github.com/nerdneilsfield/homebrew-apps
+scoop install nerdneilsfield/prompts-web
+```
+
 ## 快速开始
 
 三种运行方式，任选一种。浏览器打开 <http://127.0.0.1:8080>，用 `APP_PASSWORD` 登录。`APP_ORIGIN` 填浏览器地址栏里的地址，写请求按它校验来源。
