@@ -134,6 +134,7 @@ scoops:
   - name: prompts-web
     homepage: https://github.com/nerdneilsfield/prompts-web
     description: Self-hosted prompt library and optimization workbench
+    license: MIT
     directory: bucket
     repository:
       owner: nerdneilsfield
